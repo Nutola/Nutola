@@ -138,7 +138,6 @@ struct ClaudeCLI {
         model: String = "sonnet",
         resume: String? = nil,
         builtinTools: [String] = [],
-        disallowedTools: [String] = [],
         allowedTools: [String] = [],
         mcpConfigJSON: String? = nil,
         maxTurns: Int = 1
@@ -150,8 +149,8 @@ struct ClaudeCLI {
         process.executableURL = cli
         process.arguments = buildArgs(
             prompt: prompt, systemPrompt: systemPrompt, model: model, resume: resume,
-            builtinTools: builtinTools, disallowedTools: disallowedTools,
-            allowedTools: allowedTools, mcpConfigJSON: mcpConfigJSON, maxTurns: maxTurns)
+            builtinTools: builtinTools, allowedTools: allowedTools,
+            mcpConfigJSON: mcpConfigJSON, maxTurns: maxTurns)
         process.currentDirectoryURL = workDir
 
         let stdinPipe = Pipe()
@@ -210,7 +209,6 @@ struct ClaudeCLI {
         model: String = "sonnet",
         resume: String? = nil,
         builtinTools: [String] = [],
-        disallowedTools: [String] = [],
         allowedTools: [String] = [],
         mcpConfigJSON: String? = nil,
         maxTurns: Int = 1
@@ -223,18 +221,10 @@ struct ClaudeCLI {
                     "--tools", builtinTools.joined(separator: ",")]
         if let systemPrompt { args += ["--system-prompt", systemPrompt] }
         if let resume { args += ["--resume", resume] }
-        if !disallowedTools.isEmpty { args += ["--disallowedTools", disallowedTools.joined(separator: ",")] }
         if !allowedTools.isEmpty { args += ["--allowedTools", allowedTools.joined(separator: ",")] }
         if let mcpConfigJSON { args += ["--mcp-config", mcpConfigJSON] }
         return args
     }
-
-    /// Built-in tools that can mutate the machine or run code. The Artifact
-    /// publish path loads the default tool set (so ToolSearch can reach the
-    /// deferred Artifact tool) but bans these so injected content can't act.
-    static let executionTools = [
-        "Bash", "Edit", "Write", "Agent", "Task", "Workflow", "Skill", "ScheduleWakeup",
-    ]
 
     private struct Envelope: Decodable {
         let result: String?

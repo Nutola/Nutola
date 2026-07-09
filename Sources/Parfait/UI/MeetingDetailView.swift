@@ -10,6 +10,7 @@ struct MeetingDetailView: View {
     @State private var title: String
     @State private var publishState: PublishState = .idle
     @State private var showDeleteConfirm = false
+    @State private var showCatboxConfirm = false
     // Edit drafts live here, not in the tab views, so an accidental tab switch
     // can't destroy ten minutes of transcript fixes. nil = not editing.
     @State private var notesDraft: String?
@@ -141,10 +142,13 @@ struct MeetingDetailView: View {
 
     private var publishMenu: some View {
         Menu {
-            Button("Publish to secret Gist") { publish(viaClaude: false) }
-                .disabled(!GitHubGist.isAvailable)
-            Button("Publish as Claude Artifact (experimental)") { publish(viaClaude: true) }
-                .disabled(!ClaudeCLI.isInstalled)
+            if GitHubGist.isAvailable {
+                Button("Publish to secret Gist") { publish(.gist) }
+            } else {
+                Button("Publish to secret Gist (needs gh)") {}
+                    .disabled(true)
+            }
+            Button("Publish public link…") { showCatboxConfirm = true }
             if let existing = meeting.publishedURL, let url = URL(string: existing) {
                 Divider()
                 Link("Open published page", destination: url)
@@ -172,6 +176,11 @@ struct MeetingDetailView: View {
         } message: {
             Text("This permanently removes the audio, transcript, and notes from your Mac.")
         }
+        .confirmationDialog("Publish a public link?", isPresented: $showCatboxConfirm) {
+            Button("Upload to catbox.moe") { publish(.catbox) }
+        } message: {
+            Text("This uploads the notes and transcript to catbox.moe, a free third-party host. Anyone with the link can view them, and the page isn't tied to an account you control. For a link on your own GitHub, install gh and use “Publish to secret Gist”.")
+        }
     }
 
     @ViewBuilder
@@ -194,7 +203,12 @@ struct MeetingDetailView: View {
         app.store.upsert(m)
     }
 
-    private func publish(viaClaude: Bool) {
+    enum PublishTarget {
+        case gist       // your own GitHub account, needs gh
+        case catbox     // no install, public third-party host
+    }
+
+    private func publish(_ target: PublishTarget) {
         publishState = .working
         let m = meeting
         let summary = app.store.summary(for: m.id)
@@ -203,14 +217,15 @@ struct MeetingDetailView: View {
             do {
                 let html = HTMLExporter.html(meeting: m, summaryMarkdown: summary, segments: segments)
                 let url: URL
-                if viaClaude {
-                    url = try await publishViaClaudeArtifact(html: html, title: m.title)
-                } else {
+                switch target {
+                case .gist:
                     let (_, rendered) = try await GitHubGist.publish(
                         html: html,
                         filename: "meeting.html",
                         description: "Parfait meeting notes — \(m.title)")
                     url = rendered
+                case .catbox:
+                    url = try await CatboxPublisher.publish(html: html, filename: "meeting.html")
                 }
                 // Re-fetch: the upload took a while and the meeting may have been
                 // edited (merge) or deleted (then don't resurrect it) meanwhile.
@@ -225,40 +240,6 @@ struct MeetingDetailView: View {
                 publishState = .failed(error.localizedDescription)
             }
         }
-    }
-
-    private func publishViaClaudeArtifact(html: String, title: String) async throws -> URL {
-        // The HTML is staged by the app and Claude gets read access to exactly
-        // that one file — the transcript it contains is untrusted content, so no
-        // Write (or any other built-in) is ever enabled on this run.
-        let staging = ClaudeCLI.workDir.appendingPathComponent("publish-\(UUID().uuidString).html")
-        try html.data(using: .utf8)?.write(to: staging)
-        defer { try? FileManager.default.removeItem(at: staging) }
-        // The Artifact tool is a ToolSearch-deferred tool, not selectable by name
-        // in --tools, so load the default set (which includes ToolSearch) and ban
-        // the execution-capable tools — the staged HTML is untrusted content.
-        let result = try await ClaudeCLI.run(
-            prompt: """
-            Read the HTML document at \(staging.path) and publish it as a Claude \
-            Artifact titled "\(title)". Reply with ONLY the artifact URL.
-            """,
-            builtinTools: ["default"],
-            disallowedTools: ClaudeCLI.executionTools,
-            allowedTools: ["Artifact", "Read(//\(staging.path))"],
-            maxTurns: 6
-        )
-        // Only accept a real Claude artifact URL — never persist a hallucinated
-        // link (which would otherwise be saved and copied as if it worked).
-        let url = result.text.split(whereSeparator: \.isWhitespace)
-            .compactMap { URL(string: String($0)) }
-            .last { Self.isArtifactURL($0) }
-        guard let url else { throw ClaudeCLIError.badOutput }
-        return url
-    }
-
-    private static func isArtifactURL(_ url: URL) -> Bool {
-        guard url.scheme == "https", let host = url.host()?.lowercased() else { return false }
-        return host == "claude.ai" || host == "claude.site" || host.hasSuffix(".claude.site")
     }
 
     private func exportHTML() {

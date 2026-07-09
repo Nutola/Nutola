@@ -45,10 +45,10 @@ final class ClaudeCLITests: XCTestCase {
     func testExplicitBuiltinToolsAreScoped() {
         let args = ClaudeCLI.buildArgs(
             prompt: "p",
-            builtinTools: ["Artifact", "Read"],
-            allowedTools: ["Artifact", "Read(//tmp/x.html)"])
-        XCTAssertEqual(value(after: "--tools", in: args), "Artifact,Read")
-        XCTAssertEqual(value(after: "--allowedTools", in: args), "Artifact,Read(//tmp/x.html)")
+            builtinTools: ["Read"],
+            allowedTools: ["Read(//tmp/x.html)"])
+        XCTAssertEqual(value(after: "--tools", in: args), "Read")
+        XCTAssertEqual(value(after: "--allowedTools", in: args), "Read(//tmp/x.html)")
     }
 
     func testAllowedToolsJoined() {

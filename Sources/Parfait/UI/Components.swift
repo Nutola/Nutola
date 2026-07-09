@@ -54,16 +54,15 @@ struct StateBadge: View {
     }
 }
 
+/// Only flags the exception: output produced by Claude (your account, off-device).
+/// On-device is the default and needs no chip.
 struct ProviderBadge: View {
     let provider: String?
 
     var body: some View {
-        if let provider {
-            Label(
-                provider == "apple" ? "On-device" : "Claude",
-                systemImage: provider == "apple" ? "apple.logo" : "sparkles"
-            )
-            .badgeStyle(provider == "apple" ? .secondary : Theme.blueberry)
+        if provider == "claude" {
+            Label("Claude", systemImage: "sparkles")
+                .badgeStyle(Theme.blueberry)
         }
     }
 }

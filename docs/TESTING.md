@@ -40,7 +40,10 @@ logic (store, labeling, formatting, templates, MCP, HTML export, CLI args).
       (Claude badge; needs `claude` logged in)
 
 ## Publish
-- [ ] Share → Publish to secret Gist returns a URL that renders the styled page
+- [ ] Share → Publish to secret Gist returns a URL that renders the styled page (needs gh)
+- [ ] Share → Publish public link → catbox.moe confirmation → returns a rendered URL (no gh needed)
+- [ ] With gh not installed, the Gist item is disabled but the public link still works
+- [ ] Share → Export HTML… writes a self-contained file that opens in a browser
 - [ ] URL lands on the clipboard; "Open published page" works after reselecting meeting
 
 ## MCP
