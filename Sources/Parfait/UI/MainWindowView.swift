@@ -78,7 +78,7 @@ struct MainWindowView: View {
     private var detail: some View {
         switch selection {
         case .library:
-            LibraryChatView()
+            LibraryChatView(chat: app.libraryChat)
         case .meeting(let id):
             if let meeting = app.store.meetings.first(where: { $0.id == id }) {
                 MeetingDetailView(meeting: meeting)

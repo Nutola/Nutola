@@ -9,6 +9,9 @@ enum Bootstrap {
     static let version = "0.1.0"
 
     static func main() {
+        // A claude/gh subprocess (or the MCP client) exiting before draining a
+        // pipe would otherwise SIGPIPE-kill the whole app mid-recording.
+        signal(SIGPIPE, SIG_IGN)
         let args = CommandLine.arguments
         if args.contains("--version") {
             print("parfait \(version)")

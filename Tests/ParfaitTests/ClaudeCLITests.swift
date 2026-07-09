@@ -7,7 +7,7 @@ final class ClaudeCLITests: XCTestCase {
         return args[i + 1]
     }
 
-    func testDefaultsDisableAllTools() {
+    func testDefaultsDisableAllBuiltinTools() {
         let args = ClaudeCLI.buildArgs(prompt: "hello")
         XCTAssertEqual(Array(args.prefix(2)), ["-p", "hello"])
         XCTAssertEqual(value(after: "--output-format", in: args), "json")
@@ -31,24 +31,28 @@ final class ClaudeCLITests: XCTestCase {
         XCTAssertEqual(value(after: "--max-turns", in: args), "3")
     }
 
-    func testAllowedToolsSuppressesEmptyToolsFlag() {
-        let args = ClaudeCLI.buildArgs(prompt: "p", allowedTools: ["Read", "Bash(git *)"])
-        XCTAssertEqual(value(after: "--allowedTools", in: args), "Read,Bash(git *)")
-        XCTAssertFalse(args.contains("--tools"))
-    }
-
-    func testMCPConfigSuppressesEmptyToolsFlag() {
-        let json = "{\"mcpServers\":{}}"
-        let args = ClaudeCLI.buildArgs(prompt: "p", mcpConfigJSON: json)
-        XCTAssertEqual(value(after: "--mcp-config", in: args), json)
-        XCTAssertFalse(args.contains("--tools"))
+    func testBuiltinsStayDisabledWithMCPAndAllowedTools() {
+        // The security-relevant invariant: enabling MCP tools must NOT re-enable
+        // the built-in tool set (Bash, Write, …).
+        let args = ClaudeCLI.buildArgs(
+            prompt: "p", allowedTools: ["mcp__parfait__search_meetings"], mcpConfigJSON: "{}")
+        XCTAssertEqual(value(after: "--tools", in: args), "")
+        XCTAssertEqual(value(after: "--allowedTools", in: args), "mcp__parfait__search_meetings")
+        XCTAssertEqual(value(after: "--mcp-config", in: args), "{}")
         XCTAssertTrue(args.contains("--strict-mcp-config"))
     }
 
-    func testAllowedToolsPlusMCPConfig() {
-        let args = ClaudeCLI.buildArgs(prompt: "p", allowedTools: ["mcp__parfait"], mcpConfigJSON: "{}")
-        XCTAssertEqual(value(after: "--allowedTools", in: args), "mcp__parfait")
-        XCTAssertEqual(value(after: "--mcp-config", in: args), "{}")
-        XCTAssertFalse(args.contains("--tools"))
+    func testExplicitBuiltinToolsAreScoped() {
+        let args = ClaudeCLI.buildArgs(
+            prompt: "p",
+            builtinTools: ["Artifact", "Read"],
+            allowedTools: ["Artifact", "Read(//tmp/x.html)"])
+        XCTAssertEqual(value(after: "--tools", in: args), "Artifact,Read")
+        XCTAssertEqual(value(after: "--allowedTools", in: args), "Artifact,Read(//tmp/x.html)")
+    }
+
+    func testAllowedToolsJoined() {
+        let args = ClaudeCLI.buildArgs(prompt: "p", allowedTools: ["Read", "Bash(git *)"])
+        XCTAssertEqual(value(after: "--allowedTools", in: args), "Read,Bash(git *)")
     }
 }

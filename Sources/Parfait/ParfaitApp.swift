@@ -33,6 +33,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         Task { @MainActor in AppState.shared.bootstrap() }
     }
+
+    /// Finalize in-flight audio files before quitting — an unclosed AAC file has
+    /// no moov atom and would be unreadable on the next launch.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        MainActor.assumeIsolated {
+            AppState.shared.prepareForTermination()
+        }
+        return .terminateNow
+    }
 }
 
 struct MenuBarLabel: View {
@@ -49,8 +58,9 @@ struct MenuBarLabel: View {
     }
 
     static let templateIcon: NSImage? = {
-        guard let url = Bundle.module.url(forResource: "MenuBarIcon", withExtension: "png"),
-              let image = NSImage(contentsOf: url) else { return nil }
+        // Bundle image lookup pairs the @2x representation; NSImage(contentsOf:)
+        // would load only the 1x bitmap and render blurry on Retina.
+        guard let image = Bundle.module.image(forResource: "MenuBarIcon") else { return nil }
         image.isTemplate = true
         image.size = NSSize(width: 18, height: 18)
         return image

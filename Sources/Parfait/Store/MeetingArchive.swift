@@ -86,13 +86,26 @@ final class MeetingArchive: @unchecked Sendable {
         }
     }
 
+    enum ArchiveError: Error {
+        case meetingDeleted
+    }
+
+    /// The meeting folder is created once, at recording start. Refusing to
+    /// recreate it here means an in-flight pipeline writing back to a meeting
+    /// the user deleted mid-run fails instead of resurrecting it.
     func save(_ meeting: Meeting) throws {
         try queue.sync {
             let dir = folder(for: meeting.id)
-            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            guard FileManager.default.fileExists(atPath: dir.path) else {
+                throw ArchiveError.meetingDeleted
+            }
             let data = try encoder.encode(meeting)
             try data.write(to: dir.appendingPathComponent("meeting.json"), options: .atomic)
         }
+    }
+
+    func createFolder(for id: UUID) throws {
+        try FileManager.default.createDirectory(at: folder(for: id), withIntermediateDirectories: true)
     }
 
     func delete(id: UUID) throws {

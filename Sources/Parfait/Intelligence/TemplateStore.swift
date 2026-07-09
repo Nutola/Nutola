@@ -34,9 +34,52 @@ final class TemplateStore: @unchecked Sendable {
         list().first { $0.name == name }
     }
 
+    enum TemplateError: LocalizedError {
+        case invalidName
+        case nameTaken(String)
+
+        var errorDescription: String? {
+            switch self {
+            case .invalidName:
+                return "A template name can't contain “/” or “:”."
+            case .nameTaken(let name):
+                return "A template named “\(name)” already exists."
+            }
+        }
+    }
+
+    static func isValid(name: String) -> Bool {
+        let trimmed = name.trimmingCharacters(in: .whitespaces)
+        return !trimmed.isEmpty && !trimmed.contains("/") && !trimmed.contains(":")
+    }
+
     func save(_ template: SummaryTemplate) throws {
+        guard Self.isValid(name: template.name) else { throw TemplateError.invalidName }
         let url = dir.appendingPathComponent(template.name + ".md")
         try template.body.data(using: .utf8)!.write(to: url, options: .atomic)
+    }
+
+    /// Rename with safety: reject invalid names, refuse to overwrite a different
+    /// template, and write-before-delete so a crash can't lose the body. A
+    /// case-only rename on case-insensitive APFS is the same file, so the delete
+    /// is skipped.
+    func rename(from oldName: String, to newName: String, body: String) throws {
+        guard Self.isValid(name: newName) else { throw TemplateError.invalidName }
+        if newName == oldName {
+            try save(SummaryTemplate(name: newName, body: body))
+            return
+        }
+        if list().contains(where: { $0.name.lowercased() == newName.lowercased() })
+            && newName.lowercased() != oldName.lowercased() {
+            throw TemplateError.nameTaken(newName)
+        }
+        try save(SummaryTemplate(name: newName, body: body))
+        let oldURL = dir.appendingPathComponent(oldName + ".md")
+        let newURL = dir.appendingPathComponent(newName + ".md")
+        if oldURL.standardizedFileURL != newURL.standardizedFileURL,
+           oldName.lowercased() != newName.lowercased() {
+            try? FileManager.default.removeItem(at: oldURL)
+        }
     }
 
     func delete(named name: String) throws {

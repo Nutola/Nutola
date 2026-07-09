@@ -42,13 +42,29 @@ final class SystemAudioTap: @unchecked Sendable {
     /// Mutated only from controlQueue via ioQueue.sync; read freely on either queue.
     private var file: AVAudioFile?
 
+    /// Session start in host-clock ticks. With tapautostart the first IO callback
+    /// arrives only once some app plays sound, so the file would otherwise begin at
+    /// "first sound" while mic.m4a begins at t=0 — mis-aligning the merged transcript.
+    /// We pad the file with leading silence to close that gap. (ioQueue only.)
+    private var anchorHostTime: UInt64 = 0
+    private var didAnchor = false
+    private static let ticksPerSecond: Double = {
+        var info = mach_timebase_info_data_t()
+        mach_timebase_info(&info)
+        return 1_000_000_000.0 * Double(info.denom) / Double(info.numer)
+    }()
+
     func start(writingTo url: URL) throws {
         try controlQueue.sync {
             guard !isRunning else { throw SystemAudioTapError.alreadyRunning }
             do {
                 let tap = try createTap()
                 let file = try makeFile(at: url, tapFormat: tap.format)
-                ioQueue.sync { self.file = file }
+                ioQueue.sync {
+                    self.file = file
+                    self.anchorHostTime = mach_absolute_time()
+                    self.didAnchor = false
+                }
                 try createAggregateAndStartIO(tapUID: tap.uid, tapFormat: tap.format, file: file)
                 try installOutputDeviceListener()
                 isRunning = true
@@ -147,8 +163,8 @@ final class SystemAudioTap: @unchecked Sendable {
 
         // Tap audio arrives as the aggregate's input buffers. Format and converter are
         // baked into this IOProc's block so a rebuild can never mix formats mid-buffer.
-        let ioBlock: AudioDeviceIOBlock = { [weak self] _, inInputData, _, _, _ in
-            self?.writeInput(inInputData, format: tapFormat, converter: converter)
+        let ioBlock: AudioDeviceIOBlock = { [weak self] _, inInputData, inInputTime, _, _ in
+            self?.writeInput(inInputData, inputTime: inInputTime, format: tapFormat, converter: converter)
         }
         try check(
             AudioDeviceCreateIOProcIDWithBlock(&ioProcID, aggregateID, ioQueue, ioBlock),
@@ -218,12 +234,27 @@ final class SystemAudioTap: @unchecked Sendable {
     // MARK: - Writing (ioQueue)
 
     private func writeInput(
-        _ list: UnsafePointer<AudioBufferList>, format: AVAudioFormat, converter: AVAudioConverter?
+        _ list: UnsafePointer<AudioBufferList>,
+        inputTime: UnsafePointer<AudioTimeStamp>,
+        format: AVAudioFormat,
+        converter: AVAudioConverter?
     ) {
         guard let file,
               let input = AVAudioPCMBuffer(pcmFormat: format, bufferListNoCopy: list, deallocator: nil),
               input.frameLength > 0
         else { return }
+
+        // On the first real buffer, pad the file so its t=0 is recording start,
+        // not first-sound. Uses the buffer's host time vs the session anchor.
+        if !didAnchor {
+            didAnchor = true
+            let stamp = inputTime.pointee
+            if stamp.mFlags.contains(.hostTimeValid), stamp.mHostTime > anchorHostTime {
+                let gap = Double(stamp.mHostTime - anchorHostTime) / Self.ticksPerSecond
+                writeSilence(seconds: min(gap, 3600), to: file)
+            }
+        }
+
         do {
             guard let converter else {
                 try file.write(from: input)
@@ -250,6 +281,27 @@ final class SystemAudioTap: @unchecked Sendable {
             }
         } catch {
             // Drop the buffer; a failing disk resurfaces when the file is finalized or read.
+        }
+    }
+
+    /// Writes `seconds` of silence to the file in the file's processing format,
+    /// in ~1s chunks. Called once, before the first real buffer.
+    private func writeSilence(seconds: Double, to file: AVAudioFile) {
+        let sampleRate = file.processingFormat.sampleRate
+        var remaining = Int((seconds * sampleRate).rounded())
+        let chunk = Int(sampleRate)
+        while remaining > 0 {
+            let frames = AVAudioFrameCount(min(chunk, remaining))
+            guard let buffer = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: frames)
+            else { return }
+            buffer.frameLength = frames
+            if let channels = buffer.floatChannelData {
+                for ch in 0..<Int(file.processingFormat.channelCount) {
+                    memset(channels[ch], 0, Int(frames) * MemoryLayout<Float>.size)
+                }
+            }
+            try? file.write(from: buffer)
+            remaining -= Int(frames)
         }
     }
 

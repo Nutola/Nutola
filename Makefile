@@ -37,8 +37,14 @@ install: app
 	cp -R "$(APP)" "/Applications/$(APP_NAME).app"
 	@echo "Installed to /Applications/$(APP_NAME).app"
 
+# Regenerate every icon artifact the app actually ships from the drawing code:
+# the .icns bundled by `make app` and the @1x/@2x menu-bar template glyphs
+# loaded via Bundle.module. Keeps the README hero (AppIcon-1024.png) fresh too.
 icon:
 	swift scripts/MakeIcon.swift Resources
+	iconutil -c icns Resources/AppIcon.iconset -o Resources/AppIcon.icns
+	cp Resources/MenuBarIcon.png Resources/MenuBarIcon@2x.png Sources/Parfait/Resources/
+	rm -rf Resources/AppIcon.iconset Resources/MenuBarIcon.png Resources/MenuBarIcon@2x.png Resources/MenuBarIcon-preview.png
 
 clean:
 	rm -rf .build "$(DIST)"

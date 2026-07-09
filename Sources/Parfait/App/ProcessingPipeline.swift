@@ -4,19 +4,22 @@ import Foundation
 /// label segments → summarize + title. Pure orchestration; every stage is
 /// resilient — a meeting with any transcript at all ends up .ready.
 enum ProcessingPipeline {
-    struct Progress: Sendable {
-        var stage: String
+    /// Everything the pipeline is allowed to change on a meeting. AppState
+    /// merges this onto a FRESH copy of the meeting, so user edits made during
+    /// the (minutes-long) run are never clobbered by a stale snapshot.
+    struct Outcome: Sendable {
+        var state: MeetingState
+        var notice: String?
+        var speakers: [Speaker]?
+        var summaryProvider: String?
+        var generatedTitle: String?
     }
 
     static func run(
-        meeting initial: Meeting,
+        meeting: Meeting,
         archive: MeetingArchive,
         onProgress: @escaping @Sendable (String) -> Void
-    ) async -> Meeting {
-        var meeting = initial
-        meeting.state = .processing
-        try? archive.save(meeting)
-
+    ) async -> Outcome {
         let micURL = archive.micURL(for: meeting.id)
         let systemURL = archive.systemURL(for: meeting.id)
         let hasMic = FileManager.default.fileExists(atPath: micURL.path)
@@ -43,10 +46,9 @@ enum ProcessingPipeline {
         }
 
         guard micOut != nil || systemOut != nil else {
-            meeting.state = .failed
-            meeting.notice = notices.isEmpty ? "No audio could be transcribed." : notices.joined(separator: " ")
-            try? archive.save(meeting)
-            return meeting
+            return Outcome(
+                state: .failed,
+                notice: notices.isEmpty ? "No audio could be transcribed." : notices.joined(separator: " "))
         }
 
         // 2. Speakers.
@@ -60,31 +62,30 @@ enum ProcessingPipeline {
         let myName = NSFullUserName().isEmpty ? "Me" : NSFullUserName()
         let (segments, speakers) = SpeakerLabeler.label(
             mic: micOut, system: systemOut, systemTurns: turns, myName: myName)
-        meeting.speakers = speakers
         try? archive.saveTranscript(segments, for: meeting.id)
+
+        var outcome = Outcome(state: .ready, speakers: speakers)
+        var labeled = meeting
+        labeled.speakers = speakers
 
         // 3. Summary + title.
         onProgress("Summarizing…")
         let transcriptText = TranscriptFormatter.plainText(segments, speakers: speakers)
-        let summaryOutcome = await summarize(meeting: meeting, transcript: transcriptText)
+        let summaryOutcome = await summarize(meeting: labeled, transcript: transcriptText)
         switch summaryOutcome {
         case .success(let summary, let provider):
             try? archive.saveSummary(summary, for: meeting.id)
-            meeting.summaryProvider = provider
+            outcome.summaryProvider = provider
             if meeting.calendarEventTitle == nil {
                 onProgress("Naming the meeting…")
-                if let title = await generateTitle(summary: summary, provider: provider) {
-                    meeting.title = title
-                }
+                outcome.generatedTitle = await generateTitle(summary: summary, provider: provider)
             }
         case .failure(let why):
             notices.append(why)
         }
 
-        meeting.state = .ready
-        meeting.notice = notices.isEmpty ? nil : notices.joined(separator: " ")
-        try? archive.save(meeting)
-        return meeting
+        outcome.notice = notices.isEmpty ? nil : notices.joined(separator: " ")
+        return outcome
     }
 
     enum SummaryOutcome {

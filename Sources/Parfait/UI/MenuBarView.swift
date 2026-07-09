@@ -76,7 +76,7 @@ struct MenuBarView: View {
                 .font(.parfait(12, .semibold))
             HStack {
                 Button {
-                    Task { await app.startRecording(sourceApp: appName) }
+                    Task { await app.acceptDetection() }
                 } label: {
                     Text("Record meeting").font(.parfait(12, .semibold))
                 }

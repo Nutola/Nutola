@@ -33,7 +33,9 @@ struct MeetingChatView: View {
 }
 
 struct LibraryChatView: View {
-    @StateObject private var chat = LibraryChat()
+    // Owned by AppState: sidebar selection changes and window close/reopen must
+    // not wipe a library-wide conversation (or abandon an in-flight answer).
+    @ObservedObject var chat: LibraryChat
 
     var body: some View {
         ChatTranscriptView(

@@ -3,27 +3,25 @@ import SwiftUI
 struct NotesTab: View {
     @EnvironmentObject private var app: AppState
     let meeting: Meeting
-
-    @State private var editing = false
-    @State private var draft = ""
+    /// Owned by MeetingDetailView so tab switches can't drop an unsaved edit.
+    @Binding var draft: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
                 templateMenu
                 Spacer()
-                if editing {
-                    Button("Cancel") { editing = false }
+                if draft != nil {
+                    Button("Cancel") { draft = nil }
                     Button("Save") {
-                        app.store.saveSummary(draft, for: meeting.id)
-                        editing = false
+                        if let draft { app.store.saveSummary(draft, for: meeting.id) }
+                        draft = nil
                     }
                     .buttonStyle(.borderedProminent)
                     .tint(Theme.raspberry)
                 } else {
                     Button {
                         draft = app.store.summary(for: meeting.id)
-                        editing = true
                     } label: {
                         Label("Edit", systemImage: "pencil")
                     }
@@ -34,8 +32,8 @@ struct NotesTab: View {
             .padding(.horizontal, 20)
             .padding(.vertical, 10)
 
-            if editing {
-                TextEditor(text: $draft)
+            if draft != nil {
+                TextEditor(text: Binding(get: { draft ?? "" }, set: { draft = $0 }))
                     .font(.system(size: 13, design: .monospaced))
                     .scrollContentBackground(.hidden)
                     .padding(12)
@@ -92,9 +90,9 @@ struct NotesTab: View {
 struct TranscriptTab: View {
     @EnvironmentObject private var app: AppState
     let meeting: Meeting
+    /// Owned by MeetingDetailView so tab switches can't drop an unsaved edit.
+    @Binding var draft: String?
 
-    @State private var editing = false
-    @State private var draft = ""
     @State private var renaming: Speaker?
     @State private var newName = ""
 
@@ -107,15 +105,14 @@ struct TranscriptTab: View {
                     .font(.parfait(11))
                     .foregroundStyle(.tertiary)
                 Spacer()
-                if editing {
-                    Button("Cancel") { editing = false }
+                if draft != nil {
+                    Button("Cancel") { draft = nil }
                     Button("Save") { saveEdits() }
                         .buttonStyle(.borderedProminent)
                         .tint(Theme.raspberry)
                 } else {
                     Button {
                         draft = TranscriptFormatter.plainText(segments, speakers: meeting.speakers)
-                        editing = true
                     } label: {
                         Label("Edit as text", systemImage: "pencil")
                     }
@@ -126,8 +123,8 @@ struct TranscriptTab: View {
             .padding(.horizontal, 20)
             .padding(.vertical, 10)
 
-            if editing {
-                TextEditor(text: $draft)
+            if draft != nil {
+                TextEditor(text: Binding(get: { draft ?? "" }, set: { draft = $0 }))
                     .font(.system(size: 13, design: .monospaced))
                     .scrollContentBackground(.hidden)
                     .padding(12)
@@ -255,13 +252,16 @@ struct TranscriptTab: View {
     }
 
     private func saveEdits() {
+        guard let text = draft else { return }
         let (parsed, speakers) = TranscriptFormatter.parseEdited(
-            draft, originalSegments: segments, speakers: meeting.speakers)
-        guard !parsed.isEmpty else { editing = false; return }
+            text, originalSegments: segments, speakers: meeting.speakers)
+        guard !parsed.isEmpty else { draft = nil; return }
         app.store.saveTranscript(parsed, for: meeting.id)
-        var m = meeting
-        m.speakers = speakers
-        app.store.upsert(m)
-        editing = false
+        // Re-fetch: don't clobber concurrent changes with the view's snapshot.
+        if var fresh = app.store.meeting(id: meeting.id) {
+            fresh.speakers = speakers
+            app.store.upsert(fresh)
+        }
+        draft = nil
     }
 }

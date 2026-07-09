@@ -34,6 +34,40 @@ final class TemplateTests: XCTestCase {
         try store.delete(named: "Retro")
         XCTAssertNil(store.template(named: "Retro"))
     }
+
+    func testTemplateRenameRejectsSlashAndKeepsBody() throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("parfait-tpl-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let store = TemplateStore(root: tmp)
+        try store.save(SummaryTemplate(name: "Weekly", body: "## Agenda"))
+        XCTAssertThrowsError(try store.rename(from: "Weekly", to: "Notes 6/25", body: "## Agenda"))
+        // The original must survive a rejected rename.
+        XCTAssertEqual(store.template(named: "Weekly")?.body, "## Agenda")
+    }
+
+    func testTemplateRenameRefusesToOverwriteAnother() throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("parfait-tpl-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let store = TemplateStore(root: tmp)
+        try store.save(SummaryTemplate(name: "A", body: "aaa"))
+        try store.save(SummaryTemplate(name: "B", body: "bbb"))
+        XCTAssertThrowsError(try store.rename(from: "A", to: "B", body: "aaa"))
+        XCTAssertEqual(store.template(named: "B")?.body, "bbb") // untouched
+        XCTAssertEqual(store.template(named: "A")?.body, "aaa") // still there
+    }
+
+    func testTemplateRenameSucceeds() throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("parfait-tpl-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let store = TemplateStore(root: tmp)
+        try store.save(SummaryTemplate(name: "Old", body: "body"))
+        try store.rename(from: "Old", to: "New", body: "body v2")
+        XCTAssertNil(store.template(named: "Old"))
+        XCTAssertEqual(store.template(named: "New")?.body, "body v2")
+    }
 }
 
 final class FormatterTests: XCTestCase {
@@ -86,6 +120,23 @@ final class FormatterTests: XCTestCase {
         XCTAssertEqual(parsed[1].speakerID, outSpeakers.first { $0.name == "Bob" }!.id)
         // reused original end time for the matching 0:03 segment
         XCTAssertEqual(parsed[1].end, 5)
+    }
+
+    func testParseEditedKeepsDistinctSpeakersSharingAName() {
+        // Two speakers with the same display name must NOT be merged by a no-op
+        // save — identity resolves by timestamp for unchanged names.
+        let dupSpeakers = [
+            Speaker(id: "me", name: "Alex", isMe: true),
+            Speaker(id: "s1", name: "Alex"),
+        ]
+        let segs = [
+            TranscriptSegment(speakerID: "me", start: 0, end: 2, text: "Hi."),
+            TranscriptSegment(speakerID: "s1", start: 3, end: 5, text: "Hello."),
+        ]
+        let text = TranscriptFormatter.plainText(segs, speakers: dupSpeakers)
+        let (parsed, _) = TranscriptFormatter.parseEdited(
+            text, originalSegments: segs, speakers: dupSpeakers)
+        XCTAssertEqual(parsed.map(\.speakerID), ["me", "s1"])
     }
 
     func testParseEditedContinuationLines() {

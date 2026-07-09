@@ -10,6 +10,10 @@ struct MeetingDetailView: View {
     @State private var title: String
     @State private var publishState: PublishState = .idle
     @State private var showDeleteConfirm = false
+    // Edit drafts live here, not in the tab views, so an accidental tab switch
+    // can't destroy ten minutes of transcript fixes. nil = not editing.
+    @State private var notesDraft: String?
+    @State private var transcriptDraft: String?
 
     enum Tab: String, CaseIterable {
         case notes = "Notes"
@@ -95,8 +99,8 @@ struct MeetingDetailView: View {
                     Label(notice, systemImage: "exclamationmark.triangle")
                         .font(.parfait(12))
                         .foregroundStyle(.orange)
-                    Button("Regenerate") {
-                        Task { await app.regenerateSummary(meetingID: meeting.id) }
+                    Button(meeting.state == .failed ? "Retry" : "Regenerate") {
+                        Task { await app.retry(meetingID: meeting.id) }
                     }
                     .controlSize(.small)
                 }
@@ -174,9 +178,9 @@ struct MeetingDetailView: View {
     private var content: some View {
         switch tab {
         case .notes:
-            NotesTab(meeting: meeting)
+            NotesTab(meeting: meeting, draft: $notesDraft)
         case .transcript:
-            TranscriptTab(meeting: meeting)
+            TranscriptTab(meeting: meeting, draft: $transcriptDraft)
         case .chat:
             MeetingChatView(meeting: meeting, store: app.store)
         }
@@ -208,9 +212,12 @@ struct MeetingDetailView: View {
                         description: "Parfait meeting notes — \(m.title)")
                     url = rendered
                 }
-                var updated = m
-                updated.publishedURL = url.absoluteString
-                app.store.upsert(updated)
+                // Re-fetch: the upload took a while and the meeting may have been
+                // edited (merge) or deleted (then don't resurrect it) meanwhile.
+                if var fresh = app.store.meeting(id: m.id) {
+                    fresh.publishedURL = url.absoluteString
+                    app.store.upsert(fresh)
+                }
                 publishState = .done(url)
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(url.absoluteString, forType: .string)
@@ -221,13 +228,19 @@ struct MeetingDetailView: View {
     }
 
     private func publishViaClaudeArtifact(html: String, title: String) async throws -> URL {
+        // The HTML is staged by the app and Claude gets read access to exactly
+        // that one file — the transcript it contains is untrusted content, so no
+        // Write (or any other built-in) is ever enabled on this run.
+        let staging = ClaudeCLI.workDir.appendingPathComponent("publish-\(UUID().uuidString).html")
+        try html.data(using: .utf8)?.write(to: staging)
+        defer { try? FileManager.default.removeItem(at: staging) }
         let result = try await ClaudeCLI.run(
             prompt: """
-            Publish the HTML document provided as input as a Claude Artifact titled \
-            "\(title)". Use your Artifact tool. Reply with ONLY the artifact URL.
+            Read the HTML document at \(staging.path) and publish it as a Claude \
+            Artifact titled "\(title)". Reply with ONLY the artifact URL.
             """,
-            stdin: html,
-            allowedTools: ["Artifact", "Write"],
+            builtinTools: ["Artifact", "Read"],
+            allowedTools: ["Artifact", "Read(//\(staging.path))"],
             maxTurns: 6
         )
         let candidates = result.text.split(whereSeparator: \.isWhitespace)

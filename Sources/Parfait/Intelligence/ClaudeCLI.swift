@@ -30,7 +30,13 @@ struct ClaudeCLI {
 
     // `which claude` from a GUI app is unreliable (no login-shell PATH, wrapper shims
     // can shadow the real binary) — probe known install paths first, login shell last.
-    private static let discovered: URL? = {
+    // The login-shell probe can take seconds (nvm etc. in ~/.zprofile), so it never
+    // runs on the main thread: UI reads `isInstalled` (fast paths + cache only) and
+    // bootstrap() warms the full resolution in the background.
+    private static let cacheLock = NSLock()
+    nonisolated(unsafe) private static var cachedResolution: URL??
+
+    private static func fastProbe() -> URL? {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         let candidates = [
             "\(home)/.local/bin/claude",
@@ -41,6 +47,10 @@ struct ClaudeCLI {
         for path in candidates where FileManager.default.isExecutableFile(atPath: path) {
             return URL(fileURLWithPath: path)
         }
+        return nil
+    }
+
+    private static func shellProbe() -> URL? {
         let sh = Process()
         sh.executableURL = URL(fileURLWithPath: "/bin/zsh")
         sh.arguments = ["-lc", "command -v claude"]
@@ -56,11 +66,34 @@ struct ClaudeCLI {
               !path.isEmpty
         else { return nil }
         return URL(fileURLWithPath: path)
-    }()
+    }
 
-    static func discover() -> URL? { discovered }
+    /// Full discovery including the slow login-shell fallback. Memoized. Call
+    /// off the main thread.
+    static func resolveBlocking() -> URL? {
+        cacheLock.lock()
+        if let cached = cachedResolution {
+            cacheLock.unlock()
+            return cached
+        }
+        cacheLock.unlock()
+        let found = fastProbe() ?? shellProbe()
+        cacheLock.lock()
+        cachedResolution = .some(found)
+        cacheLock.unlock()
+        return found
+    }
 
-    static var isInstalled: Bool { discovered != nil }
+    /// Main-thread-safe: uses the cached resolution when available, otherwise
+    /// only the fast path probes (a shell-only install shows up once
+    /// bootstrap's warm-up completes).
+    static var isInstalled: Bool {
+        cacheLock.lock()
+        let cached = cachedResolution
+        cacheLock.unlock()
+        if let cached { return cached != nil }
+        return fastProbe() != nil
+    }
 
     /// Neutral cwd for every invocation: --resume session lookup is scoped to cwd, and an
     /// app-owned dir keeps stray project CLAUDE.md files out of the model context.
@@ -72,7 +105,7 @@ struct ClaudeCLI {
     }
 
     static func isLoggedIn() -> Bool {
-        guard let cli = discovered else { return false }
+        guard let cli = resolveBlocking() else { return false }
         let process = Process()
         process.executableURL = cli
         process.arguments = ["auth", "status", "--json"]
@@ -95,18 +128,20 @@ struct ClaudeCLI {
         systemPrompt: String? = nil,
         model: String = "sonnet",
         resume: String? = nil,
+        builtinTools: [String] = [],
         allowedTools: [String] = [],
         mcpConfigJSON: String? = nil,
         maxTurns: Int = 1
     ) async throws -> RunResult {
-        guard let cli = discovered else { throw ClaudeCLIError.notInstalled }
+        guard let cli = resolveBlocking() else { throw ClaudeCLIError.notInstalled }
         guard isLoggedIn() else { throw ClaudeCLIError.notLoggedIn }
 
         let process = Process()
         process.executableURL = cli
         process.arguments = buildArgs(
             prompt: prompt, systemPrompt: systemPrompt, model: model, resume: resume,
-            allowedTools: allowedTools, mcpConfigJSON: mcpConfigJSON, maxTurns: maxTurns)
+            builtinTools: builtinTools, allowedTools: allowedTools,
+            mcpConfigJSON: mcpConfigJSON, maxTurns: maxTurns)
         process.currentDirectoryURL = workDir
 
         let stdinPipe = Pipe()
@@ -156,12 +191,15 @@ struct ClaudeCLI {
     }
 
     // Never --bare (breaks subscription/keychain auth); never --no-session-persistence
-    // (resume must keep working).
+    // (resume must keep working). The built-in tool set is ALWAYS pinned explicitly:
+    // the default "" means even a run that enables MCP tools loads no Bash/Write/etc.,
+    // so prompt injection in meeting content has nothing to execute with.
     static func buildArgs(
         prompt: String,
         systemPrompt: String? = nil,
         model: String = "sonnet",
         resume: String? = nil,
+        builtinTools: [String] = [],
         allowedTools: [String] = [],
         mcpConfigJSON: String? = nil,
         maxTurns: Int = 1
@@ -170,10 +208,8 @@ struct ClaudeCLI {
                     "--output-format", "json",
                     "--model", model,
                     "--max-turns", String(maxTurns),
-                    "--strict-mcp-config"]
-        if allowedTools.isEmpty && mcpConfigJSON == nil {
-            args += ["--tools", ""]
-        }
+                    "--strict-mcp-config",
+                    "--tools", builtinTools.joined(separator: ",")]
         if let systemPrompt { args += ["--system-prompt", systemPrompt] }
         if let resume { args += ["--resume", resume] }
         if !allowedTools.isEmpty { args += ["--allowedTools", allowedTools.joined(separator: ",")] }

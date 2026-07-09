@@ -24,7 +24,18 @@ final class StoreTests: XCTestCase {
             Speaker(id: "s1", name: "Speaker 1"),
         ]
         m.state = .ready
+        // save() refuses to (re)create the folder — start-of-recording owns that.
+        try? archive.createFolder(for: m.id)
         return m
+    }
+
+    func testSaveRefusesToResurrectDeletedMeeting() throws {
+        let m = makeMeeting()
+        try archive.save(m)
+        try archive.delete(id: m.id)
+        // A late pipeline write must not recreate the deleted meeting on disk.
+        XCTAssertThrowsError(try archive.save(m))
+        XCTAssertNil(archive.meeting(id: m.id))
     }
 
     func testMeetingRoundTrip() throws {

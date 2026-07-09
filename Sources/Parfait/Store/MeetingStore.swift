@@ -22,7 +22,14 @@ final class MeetingStore: ObservableObject {
 
     @discardableResult
     func upsert(_ meeting: Meeting) -> Meeting {
-        try? archive.save(meeting)
+        do {
+            try archive.save(meeting)
+        } catch {
+            // Most likely the meeting was deleted out from under a long-running
+            // task — don't resurrect it in memory either.
+            meetings.removeAll { $0.id == meeting.id }
+            return meeting
+        }
         if let i = meetings.firstIndex(where: { $0.id == meeting.id }) {
             meetings[i] = meeting
         } else {

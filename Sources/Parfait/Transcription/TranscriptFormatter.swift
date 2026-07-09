@@ -50,6 +50,7 @@ enum TranscriptFormatter {
     ) -> ([TranscriptSegment], [Speaker]) {
         var speakers = speakers
         var idsByName = Dictionary(speakers.map { ($0.name, $0.id) }, uniquingKeysWith: { a, _ in a })
+        let namesByID = Dictionary(uniqueKeysWithValues: speakers.map { ($0.id, $0.name) })
         var segments: [TranscriptSegment] = []
         var nextSpeakerNum = speakers.filter { !$0.isMe }.count + 1
 
@@ -62,8 +63,16 @@ enum TranscriptFormatter {
                 let seconds: Int = Int(m.3) ?? 0
                 let start = TimeInterval(minutes * 60 + seconds)
                 let body = String(m.4)
+                let original = originalSegments.first { abs($0.start - start) < 0.5 }
+
+                // Display names aren't unique (two Alexes), so identity resolves
+                // by timestamp first: an unchanged name on a line keeps that
+                // line's original speaker id. Name lookup is only for lines the
+                // user deliberately reassigned.
                 let speakerID: String
-                if let existing = idsByName[name] {
+                if let original, namesByID[original.speakerID] == name {
+                    speakerID = original.speakerID
+                } else if let existing = idsByName[name] {
                     speakerID = existing
                 } else {
                     speakerID = "s\(nextSpeakerNum)"
@@ -71,8 +80,6 @@ enum TranscriptFormatter {
                     speakers.append(Speaker(id: speakerID, name: name))
                     idsByName[name] = speakerID
                 }
-                // Reuse the original end time when the segment lines up, else estimate.
-                let original = originalSegments.first { abs($0.start - start) < 0.5 }
                 segments.append(TranscriptSegment(
                     speakerID: speakerID,
                     start: start,

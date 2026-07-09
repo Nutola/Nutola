@@ -210,6 +210,7 @@ private struct TemplateSettings: View {
     @State private var selected: String?
     @State private var draftName = ""
     @State private var draftBody = ""
+    @State private var saveError: String?
 
     var body: some View {
         HSplitView {
@@ -257,11 +258,16 @@ private struct TemplateSettings: View {
                         .font(.parfait(10))
                         .foregroundStyle(.secondary)
                     HStack {
+                        if let saveError {
+                            Label(saveError, systemImage: "exclamationmark.triangle")
+                                .font(.parfait(11))
+                                .foregroundStyle(.orange)
+                        }
                         Spacer()
                         Button("Save") { save() }
                             .buttonStyle(.borderedProminent)
                             .tint(Theme.raspberry)
-                            .disabled(draftName.trimmingCharacters(in: .whitespaces).isEmpty)
+                            .disabled(!TemplateStore.isValid(name: draftName))
                     }
                 } else {
                     EmptyStateView(
@@ -294,11 +300,13 @@ private struct TemplateSettings: View {
     private func save() {
         guard let selected else { return }
         let newName = draftName.trimmingCharacters(in: .whitespaces)
-        if newName != selected {
-            try? app.templates.delete(named: selected)
+        do {
+            try app.templates.rename(from: selected, to: newName, body: draftBody)
+            saveError = nil
+            reload(select: newName)
+        } catch {
+            saveError = error.localizedDescription
         }
-        try? app.templates.save(SummaryTemplate(name: newName, body: draftBody))
-        reload(select: newName)
     }
 }
 

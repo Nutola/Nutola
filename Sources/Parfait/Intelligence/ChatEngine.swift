@@ -75,14 +75,19 @@ final class MeetingChat: ObservableObject {
             return
         }
         do {
+            // --system-prompt is per-invocation (sessions persist only the
+            // transcript), so it rides on resumed turns too or Claude reverts
+            // to its coding-assistant persona.
+            let persona = "You are Parfait's meeting assistant. Answer based only on the provided meeting record. Be concise and cite speakers/timestamps when useful."
             let result: ClaudeCLI.RunResult
             if let sessionID = claudeSessionID {
-                result = try await ClaudeCLI.run(prompt: question, resume: sessionID)
+                result = try await ClaudeCLI.run(
+                    prompt: question, systemPrompt: persona, resume: sessionID)
             } else {
                 result = try await ClaudeCLI.run(
                     prompt: "Answer questions about this meeting.\n\nQuestion: \(question)",
                     stdin: context,
-                    systemPrompt: "You are Parfait's meeting assistant. Answer based only on the provided meeting record. Be concise and cite speakers/timestamps when useful."
+                    systemPrompt: persona
                 )
             }
             claudeSessionID = result.sessionID
@@ -129,16 +134,17 @@ final class LibraryChat: ObservableObject {
         defer { isThinking = false }
 
         do {
-            // MCP config and tool allowances are per-invocation, so they ride on
-            // every turn; only the session transcript persists via --resume.
+            // MCP config, tool allowances, AND the system prompt are all
+            // per-invocation, so they ride on every turn; only the session
+            // transcript persists via --resume.
             let result = try await ClaudeCLI.run(
                 prompt: question,
-                systemPrompt: sessionID == nil ? """
+                systemPrompt: """
                 You are Parfait's meeting librarian. You answer questions about the user's \
                 recorded meetings using the parfait MCP tools (search_meetings, list_meetings, \
                 get_meeting, get_transcript). Search before answering; name the meeting and date \
                 you found things in. If nothing matches, say so plainly.
-                """ : nil,
+                """,
                 resume: sessionID,
                 allowedTools: Self.allowedTools,
                 mcpConfigJSON: Self.mcpConfigJSON,

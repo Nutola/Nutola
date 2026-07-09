@@ -17,6 +17,7 @@ final class MCPServerTests: XCTestCase {
         m.speakers = [Speaker(id: "me", name: "Me", isMe: true), Speaker(id: "s1", name: "Priya")]
         m.duration = 1800
         m.state = .ready
+        try archive.createFolder(for: m.id)
         try archive.save(m)
         try archive.saveTranscript(
             [TranscriptSegment(speakerID: "s1", start: 12, end: 15, text: "Let's move launch to March.")],
