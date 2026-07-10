@@ -126,8 +126,8 @@ final class AppState: NSObject, ObservableObject {
                 Task { await startRecording(sourceApp: name, trigger: event) }
             } else {
                 // A mic reconnect blip (drop + re-grab, which the auto-stop path below also
-                // debounces) shouldn't re-fire the notification + chime for a meeting we just
-                // announced. Still re-surface the prompt visually; only gate the announce.
+                // debounces) shouldn't re-fire the chime for a meeting we just announced. Still
+                // re-surface the prompt (card + glyph) visually; only gate the chime.
                 let now = ContinuousClock.now
                 let recentlyAnnounced = lastDetectionAnnounce[event.pid]
                     .map { now - $0 < Self.announceCooldown } ?? false
@@ -135,7 +135,7 @@ final class AppState: NSObject, ObservableObject {
                 pendingDetections[event.pid] = event
                 detectedAppName = name
                 pendingDetection = event
-                if !recentlyAnnounced { notifyMeetingDetected(app: name) }
+                if !recentlyAnnounced { chime() }
             }
         } else {
             activeMicApps.removeValue(forKey: event.pid)
@@ -394,16 +394,9 @@ final class AppState: NSObject, ObservableObject {
         guard Bundle.main.bundleIdentifier != nil else { return } // bare `swift run` has no bundle
         let center = UNUserNotificationCenter.current()
         center.delegate = self
-
-        let record = UNNotificationAction(
-            identifier: "RECORD", title: "Record", options: [.foreground])
-        let category = UNNotificationCategory(
-            identifier: "MEETING_DETECTED", actions: [record], intentIdentifiers: [])
-        center.setNotificationCategories([category])
-        // Plain [.alert, .sound] so the "Record it?" alert can appear as a live, tappable
-        // banner. (.provisional would skip the prompt but only grant quiet, Notification-
-        // Center-only delivery — the Record action would never surface during a call.)
-        // A denied state is surfaced by the Notifications row in Settings.
+        // Meeting detection is surfaced by the floating card + chime + menu-bar glyph, not a
+        // notification (that only buried the prompt in Notification Center). The only notification
+        // left is "notes are ready", so we just need alert+sound authorization for that.
         center.requestAuthorization(options: [.alert, .sound]) { granted, error in
             self.log.info("notification auth granted=\(granted) error=\(error?.localizedDescription ?? "none", privacy: .public)")
             Task { await self.refreshNotificationStatus() }
@@ -427,7 +420,7 @@ final class AppState: NSObject, ObservableObject {
 
     /// A short, Focus-proof audible cue for a detected meeting. NSSound plays through the
     /// default output device regardless of notification permission or Do Not Disturb — the
-    /// reliable half of "make the prompt apparent" (the menu-bar glyph is the visible half).
+    /// audible half of the prompt (the floating card + menu-bar glyph are the visible half).
     private func chime() {
         guard Bundle.main.bundleIdentifier != nil else { return } // silent under bare `swift run`/tests
         // Two meetings starting within a second shouldn't clobber the first still-playing
@@ -436,25 +429,6 @@ final class AppState: NSObject, ObservableObject {
         let sound = NSSound(named: NSSound.Name("Ping"))
         detectionChime = sound
         sound?.play()
-    }
-
-    private func notifyMeetingDetected(app: String) {
-        guard Bundle.main.bundleIdentifier != nil else { return }
-        let content = UNMutableNotificationContent()
-        content.title = "Meeting detected"
-        content.body = "\(app) started using the microphone. Record it?"
-        content.categoryIdentifier = "MEETING_DETECTED"
-        // Sound is played separately (chime()) rather than on the notification: breaking a
-        // notification through Focus/Do Not Disturb needs the Time Sensitive entitlement, which
-        // requires an Apple provisioning profile and would break the ad-hoc build. A plain
-        // NSSound plays regardless of Focus or even whether notifications are authorized at all.
-        content.sound = nil
-        chime()
-        let request = UNNotificationRequest(
-            identifier: "detected-\(Date().timeIntervalSince1970)", content: content, trigger: nil)
-        UNUserNotificationCenter.current().add(request) { error in
-            if let error { self.log.error("notification add failed: \(error.localizedDescription, privacy: .public)") }
-        }
     }
 
     private func notifyReady(_ meeting: Meeting) {
@@ -473,10 +447,14 @@ extension AppState: UNUserNotificationCenterDelegate {
         _ center: UNUserNotificationCenter,
         didReceive response: UNNotificationResponse
     ) async {
-        let id = response.actionIdentifier
-        guard id == "RECORD" || id == UNNotificationDefaultActionIdentifier else { return }
+        // Only the "notes are ready" notification remains (detection uses the floating card now).
+        // Tapping it surfaces that meeting — it must never start a recording.
+        let identifier = response.notification.request.identifier
+        guard identifier.hasPrefix("ready-"),
+              let id = UUID(uuidString: String(identifier.dropFirst("ready-".count))) else { return }
         await MainActor.run {
-            Task { await AppState.shared.acceptDetection() }
+            AppState.shared.openMeetingID = id
+            NSApp.activate()
         }
     }
 
