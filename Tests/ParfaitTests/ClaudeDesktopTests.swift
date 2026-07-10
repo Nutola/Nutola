@@ -51,8 +51,7 @@ final class ClaudeDesktopTests: XCTestCase {
 
     func testMeetingPromptNamesConnectorToolsAndMeeting() {
         let id = UUID()
-        let date = Date(timeIntervalSince1970: 1_700_000_000)
-        let prompt = ClaudeDesktopPrompt.meeting(id: id, title: "Roadmap sync", date: date, question: "What did we decide?")
+        let prompt = ClaudeDesktopPrompt.meeting(id: id, title: "Roadmap sync", question: "What did we decide?")
         XCTAssertTrue(prompt.contains("parfait"))
         XCTAssertTrue(prompt.contains("get_meeting"))
         XCTAssertTrue(prompt.contains("get_transcript"))
@@ -62,7 +61,7 @@ final class ClaudeDesktopTests: XCTestCase {
     }
 
     func testMeetingPromptFallsBackOnEmptyQuestion() {
-        let prompt = ClaudeDesktopPrompt.meeting(id: UUID(), title: "1:1", date: Date(), question: "   ")
+        let prompt = ClaudeDesktopPrompt.meeting(id: UUID(), title: "1:1", question: "   ")
         XCTAssertFalse(prompt.contains("Question: \n"))
         XCTAssertTrue(prompt.contains("overview"))
     }
@@ -79,5 +78,41 @@ final class ClaudeDesktopTests: XCTestCase {
     func testLibraryPromptFallsBackOnEmptyQuestion() {
         let prompt = ClaudeDesktopPrompt.library(question: "")
         XCTAssertTrue(prompt.contains("talking about"))
+    }
+
+    // MARK: - ClaudeCode (claude://code/new) deep links
+
+    func testCodeSessionURLSchemeHostPath() {
+        let url = ClaudeCode.codeSessionURL(prompt: "hello", folder: "/Users/me/repo")!
+        XCTAssertEqual(url.scheme, "claude")
+        XCTAssertEqual(url.host, "code")
+        XCTAssertEqual(url.path, "/new")
+    }
+
+    func testCodeSessionURLCarriesPromptAndFolder() {
+        let url = ClaudeCode.codeSessionURL(prompt: "install gh", folder: "/Users/me")!
+        let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+        XCTAssertEqual(items.first(where: { $0.name == "q" })?.value, "install gh")
+        XCTAssertEqual(items.first(where: { $0.name == "folder" })?.value, "/Users/me")
+    }
+
+    func testCodeSessionURLOmitsFolderWhenNil() {
+        let url = ClaudeCode.codeSessionURL(prompt: "hi", folder: nil)!
+        let names = (URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []).map(\.name)
+        XCTAssertFalse(names.contains("folder"))
+    }
+
+    func testCodeSessionURLEncodesPlusSign() {
+        let url = ClaudeCode.codeSessionURL(prompt: "C++ migration", folder: nil)!
+        XCTAssertTrue(url.absoluteString.contains("C%2B%2B"))
+        XCTAssertFalse(url.query!.contains("+"))
+    }
+
+    func testCodeSessionURLTruncatesLongPrompts() {
+        let huge = String(repeating: "a", count: ClaudeDesktop.maxPromptLength + 500)
+        let url = ClaudeCode.codeSessionURL(prompt: huge, folder: nil)!
+        let decoded = URLComponents(url: url, resolvingAgainstBaseURL: false)?
+            .queryItems?.first(where: { $0.name == "q" })?.value
+        XCTAssertEqual(decoded?.count, ClaudeDesktop.maxPromptLength)
     }
 }

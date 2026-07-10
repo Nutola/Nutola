@@ -134,7 +134,7 @@ struct MeetingDetailView: View {
             }
             .pickerStyle(.segmented)
             .labelsHidden()
-            .frame(maxWidth: 340)
+            .frame(maxWidth: 340, alignment: .leading)
             .padding(.top, 6)
         }
     }

@@ -140,7 +140,7 @@ struct OnboardingView: View {
         OnboardingStepRow(
             icon: "sparkles", title: "Claude access", required: false,
             detail: claudeInstalled
-                ? (claudeLoggedIn ? "Connected — unlocks long-meeting summaries." : "Installed but not logged in. Run `claude` in a terminal once.")
+                ? (claudeLoggedIn ? "Connected — unlocks long-meeting summaries." : "Installed but not logged in — open Claude Code and log in once.")
                 : "Optional — unlocks long-meeting summaries, billed to your own Claude plan.",
             ok: claudeInstalled && claudeLoggedIn
         ) {
@@ -170,14 +170,13 @@ struct OnboardingView: View {
     private var githubRow: some View {
         OnboardingStepRow(
             icon: "chevron.left.forwardslash.chevron.right", title: "GitHub access", required: false,
-            detail: ghAvailable ? "Ready — publishes meeting pages as secret gists on your own account." : "Optional — needed only to publish meeting pages. Install with Homebrew, then `gh auth login`.",
+            detail: ghAvailable ? "Ready — publishes meeting pages as secret gists on your own account." : "Optional — needed only to publish meeting pages.",
             ok: ghAvailable
         ) {
             if !ghAvailable {
-                Button("Copy install command") {
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString("brew install gh && gh auth login", forType: .string)
-                }.controlSize(.small)
+                Button("Set it up with Claude") { ClaudeCode.setUpGitHubCLI() }
+                    .controlSize(.small)
+                    .disabled(!claudeDesktopInstalled)
             }
         }
     }

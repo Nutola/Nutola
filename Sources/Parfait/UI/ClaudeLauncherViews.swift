@@ -6,7 +6,7 @@ struct MeetingLauncherView: View {
     var body: some View {
         ClaudeLauncherView(
             title: "Ask about this meeting",
-            subtitle: "Opens Claude Desktop with this meeting loaded through the parfait connector.",
+            subtitle: "Ask Claude about this meeting through the parfait connector.",
             suggestions: [
                 "What did we decide?",
                 "List every action item with owners",
@@ -14,7 +14,7 @@ struct MeetingLauncherView: View {
             ],
             promptBuilder: { question in
                 ClaudeDesktopPrompt.meeting(
-                    id: meeting.id, title: meeting.title, date: meeting.createdAt, question: question)
+                    id: meeting.id, title: meeting.title, question: question)
             }
         )
     }
@@ -28,11 +28,8 @@ struct LibraryLauncherView: View {
     var body: some View {
         ClaudeLauncherView(
             title: "Ask across every meeting",
-            subtitle: "Claude searches your local meeting library through the parfait connector.",
-            suggestions: [
-                "When did I last talk about hiring?",
-                "Summarize everything we've said about the Q3 launch",
-            ],
+            subtitle: "Ask Claude anything across your whole meeting library, through the parfait connector.",
+            suggestions: [],
             promptBuilder: { question in ClaudeDesktopPrompt.library(question: question) }
         )
         .navigationTitle("Ask your meetings")
@@ -74,6 +71,12 @@ struct ClaudeLauncherView: View {
             }
 
             composeBar
+
+            if installed {
+                Text("Tip: once the parfait connector is set up, you can just open Claude (Code or Desktop) and ask about your meetings anytime — you don't have to start here.")
+                    .font(.parfait(11))
+                    .foregroundStyle(.secondary)
+            }
 
             if launchFailed {
                 Label("Couldn't open Claude Desktop.", systemImage: "exclamationmark.triangle")

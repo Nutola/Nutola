@@ -167,7 +167,7 @@ private struct IntelligenceSettings: View {
     @State private var claudeInstalled = false
     @State private var claudeLoggedIn = false
     @State private var ghAvailable = false
-    @AppStorage(SettingsKey.renderHost) private var renderHost = RenderHost.parfaitTo.rawValue
+    @State private var claudeCodeAvailable = false
 
     var body: some View {
         Form {
@@ -193,66 +193,79 @@ private struct IntelligenceSettings: View {
                     detail: claudeInstalled
                         ? (claudeLoggedIn
                             ? "Used as a fallback when a meeting is too long for the on-device model to summarize. Billed to your own Claude plan."
-                            : "Run `claude` in a terminal once to log in.")
+                            : "Open Claude Code and log in once to enable this.")
                         : "Install from claude.com/claude-code to unlock long-meeting summaries when Apple Intelligence can't fit the transcript.")
-                statusRow(
+                actionRow(
                     ok: ghAvailable,
                     title: ghAvailable ? "GitHub CLI — ready" : "GitHub CLI — not found",
-                    detail: "Publishes meeting pages as secret gists on your own GitHub account. `brew install gh`, then `gh auth login`.")
-                Picker("Rendered link host", selection: $renderHost) {
-                    Text("parfait.to").tag(RenderHost.parfaitTo.rawValue)
-                    Text("githack").tag(RenderHost.githack.rawValue)
+                    detail: "Publishes meeting pages as secret gists on your own GitHub account."
+                ) {
+                    if !ghAvailable {
+                        Button("Set it up with Claude") { ClaudeCode.setUpGitHubCLI() }
+                            .controlSize(.small)
+                            .disabled(!claudeCodeAvailable)
+                    }
                 }
-                Text("githack is a temporary fallback for the transition to notes.parfait.to and will be removed once that's proven stable.")
-                    .font(.parfait(11))
-                    .foregroundStyle(.secondary)
             }
 
             Section("Connect Claude to your meetings") {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Let Claude (Code or Desktop) browse your meeting library from anywhere:")
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Give Claude access to your meeting library so you can ask about your meetings from anywhere. Everything stays local — the connector just reads Parfait's on-disk library.")
                         .font(.parfait(12))
+
                     HStack {
-                        Text(mcpCommand)
-                            .font(.system(size: 11, design: .monospaced))
-                            .textSelection(.enabled)
-                            .padding(8)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 6))
-                        Button {
-                            NSPasteboard.general.clearContents()
-                            NSPasteboard.general.setString(mcpCommand, forType: .string)
-                        } label: {
-                            Image(systemName: "doc.on.doc")
+                        Button("Add to Claude Code") { ClaudeCode.addMCPServer(binary: binaryPath) }
+                            .buttonStyle(.borderedProminent)
+                            .tint(Theme.raspberry)
+                        Button("Add to Claude Desktop") {
+                            ClaudeCode.addToClaudeDesktop(
+                                binary: binaryPath, configPath: claudeDesktopConfigURL.path)
                         }
-                        .buttonStyle(.plain)
-                        .help("Copy")
                     }
-                    Text("Everything stays local — the MCP server just reads Parfait's on-disk library.")
+                    .controlSize(.small)
+                    .disabled(!claudeCodeAvailable)
+
+                    Text(claudeCodeAvailable
+                         ? "Claude Code runs the setup for you and confirms it worked."
+                         : "Install Claude Desktop (it includes Claude Code) to use these buttons.")
                         .font(.parfait(11))
                         .foregroundStyle(.secondary)
 
-                    Divider().padding(.vertical, 2)
-                    Text("Or add it to Claude Desktop:")
-                        .font(.parfait(12))
-                    HStack {
-                        Text("~/Library/Application Support/Claude/claude_desktop_config.json")
-                            .font(.system(size: 11, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                        Spacer()
-                        Button("Copy JSON") {
-                            NSPasteboard.general.clearContents()
-                            NSPasteboard.general.setString(mcpDesktopConfigSnippet, forType: .string)
+                    DisclosureGroup("Prefer to run it yourself?") {
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack {
+                                Text(mcpCommand)
+                                    .font(.system(size: 11, design: .monospaced))
+                                    .textSelection(.enabled)
+                                    .padding(8)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 6))
+                                Button {
+                                    NSPasteboard.general.clearContents()
+                                    NSPasteboard.general.setString(mcpCommand, forType: .string)
+                                } label: {
+                                    Image(systemName: "doc.on.doc")
+                                }
+                                .buttonStyle(.plain)
+                                .help("Copy the claude mcp add command")
+                            }
+                            Text("Or add the \"parfait\" entry to Claude Desktop's config (merge into any existing \"mcpServers\"):")
+                                .font(.parfait(11))
+                                .foregroundStyle(.secondary)
+                            HStack {
+                                Button("Copy JSON") {
+                                    NSPasteboard.general.clearContents()
+                                    NSPasteboard.general.setString(mcpDesktopConfigSnippet, forType: .string)
+                                }
+                                Button("Reveal config in Finder") {
+                                    NSWorkspace.shared.activateFileViewerSelecting([claudeDesktopConfigURL])
+                                }
+                            }
+                            .controlSize(.small)
                         }
-                        Button("Reveal in Finder") {
-                            NSWorkspace.shared.activateFileViewerSelecting([claudeDesktopConfigURL])
-                        }
+                        .padding(.top, 4)
                     }
-                    Text("Merge the \"parfait\" entry into the existing \"mcpServers\" object — don't overwrite the file if you already have other MCP servers configured.")
-                        .font(.parfait(11))
-                        .foregroundStyle(.secondary)
+                    .font(.parfait(11))
                 }
             }
         }
@@ -260,6 +273,7 @@ private struct IntelligenceSettings: View {
         .onAppear {
             claudeInstalled = ClaudeCLI.isInstalled
             ghAvailable = GitHubGist.isAvailable
+            claudeCodeAvailable = ClaudeCode.isAvailable
             Task.detached {
                 let loggedIn = ClaudeCLI.isLoggedIn()
                 await MainActor.run { claudeLoggedIn = loggedIn }
@@ -267,18 +281,20 @@ private struct IntelligenceSettings: View {
         }
     }
 
+    private var binaryPath: String {
+        Bundle.main.executablePath ?? "/Applications/Parfait.app/Contents/MacOS/Parfait"
+    }
+
     private var mcpCommand: String {
-        let binary = Bundle.main.executablePath ?? "/Applications/Parfait.app/Contents/MacOS/Parfait"
-        return "claude mcp add parfait -s user -- \"\(binary)\" --mcp"
+        "claude mcp add parfait -s user -- \"\(binaryPath)\" --mcp"
     }
 
     private var mcpDesktopConfigSnippet: String {
-        let binary = Bundle.main.executablePath ?? "/Applications/Parfait.app/Contents/MacOS/Parfait"
-        return """
+        """
         {
           "mcpServers": {
             "parfait": {
-              "command": "\(binary)",
+              "command": "\(binaryPath)",
               "args": ["--mcp"]
             }
           }
@@ -299,6 +315,20 @@ private struct IntelligenceSettings: View {
                 Text(detail).font(.parfait(11)).foregroundStyle(.secondary)
             }
             Spacer()
+        }
+    }
+
+    private func actionRow<Action: View>(
+        ok: Bool, title: String, detail: String, @ViewBuilder action: () -> Action
+    ) -> some View {
+        HStack(alignment: .firstTextBaseline) {
+            StatusDot(ok: ok)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).font(.parfait(12, .medium))
+                Text(detail).font(.parfait(11)).foregroundStyle(.secondary)
+            }
+            Spacer()
+            action()
         }
     }
 }

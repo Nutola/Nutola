@@ -52,35 +52,92 @@ enum ClaudeDesktopPrompt {
     private static let defaultLibraryQuestion =
         "What have I been talking about across my recent meetings?"
 
-    static func meeting(id: UUID, title: String, date: Date, question: String) -> String {
+    static func meeting(id: UUID, title: String, question: String) -> String {
         let q = question.trimmingCharacters(in: .whitespacesAndNewlines)
-        let when = date.formatted(date: .abbreviated, time: .shortened)
         return """
-        Use the "parfait" connector (MCP tools get_meeting and get_transcript) to answer a \
-        question about one specific meeting recorded with Parfait.
+        Answer a question about my Parfait meeting "\(title)". Use the "parfait" connector: call \
+        get_meeting with id "\(id.uuidString)" for the summary, and get_transcript with the same \
+        id if you need exact quotes.
 
-        Meeting: "\(title)" — \(when)
-        Meeting ID: \(id.uuidString)
-
-        Call get_meeting with id "\(id.uuidString)" for the summary and metadata. If you need \
-        direct quotes, timestamps, or something the summary doesn't cover, also call \
-        get_transcript with the same id. Answer only from what those tools return.
-
-        Question: \(q.isEmpty ? defaultMeetingQuestion : q)
+        \(q.isEmpty ? defaultMeetingQuestion : q)
         """
     }
 
     static func library(question: String) -> String {
         let q = question.trimmingCharacters(in: .whitespacesAndNewlines)
         return """
-        Use the "parfait" connector (MCP tools list_meetings, search_meetings, and get_meeting) \
-        to answer a question across every meeting recorded with Parfait.
+        Answer using my Parfait meetings. Use the "parfait" connector (list_meetings, \
+        search_meetings, get_meeting) to find and read the relevant ones, and name the meetings \
+        and dates you drew from. If nothing matches, say so plainly.
 
-        Search or list meetings as needed, then call get_meeting for the full summary of any \
-        meeting that looks relevant. Name the specific meeting(s) and date(s) you found things \
-        in. If nothing matches, say so plainly — don't guess.
-
-        Question: \(q.isEmpty ? defaultLibraryQuestion : q)
+        \(q.isEmpty ? defaultLibraryQuestion : q)
         """
+    }
+}
+
+/// Deep-link launcher for a Claude Code session (claude://code/new). Unlike
+/// ClaudeDesktop's chat link, Claude Code can actually run the setup — install
+/// the GitHub CLI, register the MCP server, edit the Claude Desktop config — so
+/// the "do it for you" buttons in Settings/Onboarding open a Code session
+/// pre-filled with a prompt that performs the step (the user still reviews and
+/// approves before anything runs).
+enum ClaudeCode {
+    /// Same claude:// scheme handler as Claude Desktop; if that resolves, the
+    /// code/new deep link is handled too.
+    static var isAvailable: Bool { ClaudeDesktop.isInstalled }
+
+    /// Pure — no side effects — so it's unit-testable without NSWorkspace.
+    static func codeSessionURL(prompt: String, folder: String?) -> URL? {
+        var components = URLComponents()
+        components.scheme = "claude"
+        components.host = "code"
+        components.path = "/new"
+        var items = [URLQueryItem(name: "q", value: String(prompt.prefix(ClaudeDesktop.maxPromptLength)))]
+        if let folder { items.append(URLQueryItem(name: "folder", value: folder)) }
+        components.queryItems = items
+        // Same literal-+ quirk ClaudeDesktop.newChatURL guards against.
+        components.percentEncodedQuery = components.percentEncodedQuery?
+            .replacingOccurrences(of: "+", with: "%2B")
+        return components.url
+    }
+
+    @discardableResult
+    static func open(prompt: String, folder: String? = nil) -> Bool {
+        let workdir = folder ?? FileManager.default.homeDirectoryForCurrentUser.path
+        guard let url = codeSessionURL(prompt: prompt, folder: workdir) else { return false }
+        return NSWorkspace.shared.open(url)
+    }
+
+    // MARK: - Pre-filled setup prompts
+
+    @discardableResult
+    static func setUpGitHubCLI() -> Bool {
+        open(prompt: """
+        Set up the GitHub CLI so Parfait can publish my meeting notes as secret gists on my own \
+        GitHub account. Check whether the gh command is installed; if not, install it (use \
+        Homebrew if it is available, otherwise recommend the best option for my Mac). Then run \
+        gh auth login and confirm it worked with gh auth status.
+        """)
+    }
+
+    @discardableResult
+    static func addMCPServer(binary: String) -> Bool {
+        open(prompt: """
+        Connect Parfait to Claude Code as an MCP server so you can read my meeting library. Run \
+        this command, then confirm it is connected with claude mcp list:
+
+        claude mcp add parfait -s user -- "\(binary)" --mcp
+        """)
+    }
+
+    @discardableResult
+    static func addToClaudeDesktop(binary: String, configPath: String) -> Bool {
+        open(prompt: """
+        Add Parfait to my Claude Desktop MCP config. Edit the JSON file at \(configPath) and add a \
+        "parfait" entry under "mcpServers" with "command" set to "\(binary)" and "args" set to \
+        ["--mcp"]. Merge it with any servers already there instead of overwriting them, and create \
+        the file with just the parfait entry if it does not exist. When you are done, tell me to \
+        quit and reopen Claude Desktop.
+        """)
     }
 }

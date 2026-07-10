@@ -4,11 +4,11 @@ import XCTest
 final class GitHubGistTests: XCTestCase {
     // MARK: - renderedURL
 
-    func testParfaitToMapsModernThirtyTwoHexGist() {
+    func testMapsModernThirtyTwoHexGist() {
         let raw = "https://gist.githubusercontent.com/conrad-vanl/" +
             "0123456789abcdef0123456789abcdef/raw/" +
             "abcdef0123456789abcdef0123456789abcdef01/meeting.html"
-        let url = GitHubGist.renderedURL(fromRaw: raw, host: .parfaitTo)
+        let url = GitHubGist.renderedURL(fromRaw: raw)
         XCTAssertEqual(
             url?.absoluteString,
             "https://notes.parfait.to/conrad-vanl/" +
@@ -16,27 +16,15 @@ final class GitHubGistTests: XCTestCase {
                 "abcdef0123456789abcdef0123456789abcdef01/meeting.html")
     }
 
-    func testParfaitToMapsLegacyTwentyHexGist() {
+    func testMapsLegacyTwentyHexGist() {
         let raw = "https://gist.githubusercontent.com/conrad-vanl/" +
             "0123456789abcdef0123/raw/" +
             "abcdef0123456789abcdef0123456789abcdef01/meeting.html"
-        let url = GitHubGist.renderedURL(fromRaw: raw, host: .parfaitTo)
+        let url = GitHubGist.renderedURL(fromRaw: raw)
         XCTAssertEqual(
             url?.absoluteString,
             "https://notes.parfait.to/conrad-vanl/" +
                 "0123456789abcdef0123/raw/" +
-                "abcdef0123456789abcdef0123456789abcdef01/meeting.html")
-    }
-
-    func testGithackStillMapsToGistcdn() {
-        let raw = "https://gist.githubusercontent.com/conrad-vanl/" +
-            "0123456789abcdef0123456789abcdef/raw/" +
-            "abcdef0123456789abcdef0123456789abcdef01/meeting.html"
-        let url = GitHubGist.renderedURL(fromRaw: raw, host: .githack)
-        XCTAssertEqual(
-            url?.absoluteString,
-            "https://gistcdn.githack.com/conrad-vanl/" +
-                "0123456789abcdef0123456789abcdef/raw/" +
                 "abcdef0123456789abcdef0123456789abcdef01/meeting.html")
     }
 
@@ -45,7 +33,6 @@ final class GitHubGistTests: XCTestCase {
         // stray whitespace/control characters), so an empty raw string — the shape
         // GitHubGist.publish() actually observes when gh's raw_url lookup comes back
         // blank — is the one malformed case renderedURL guards explicitly.
-        XCTAssertNil(GitHubGist.renderedURL(fromRaw: "", host: .parfaitTo))
-        XCTAssertNil(GitHubGist.renderedURL(fromRaw: "", host: .githack))
+        XCTAssertNil(GitHubGist.renderedURL(fromRaw: ""))
     }
 }
