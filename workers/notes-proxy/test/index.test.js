@@ -17,10 +17,27 @@ const USER = 'octocat';
 const GIST_32 = 'a'.repeat(32); // real-shape 32-hex gist id
 const GIST_20 = 'b'.repeat(20); // legacy-shape 20-hex gist id
 const SHA_40 = 'c'.repeat(40);
-const FILENAME = 'meeting-notes.html';
+const FILENAME = 'meeting.html'; // constant; dropped from the token, reattached by the Worker
 
-function pathFor(user, gist, sha, filename) {
-  return `/${user}/${gist}/raw/${sha}/${filename}`;
+// Mirror of the app's GistLinkToken encoder
+// (Sources/Parfait/Publish/GistLinkToken.swift):
+// [1B user length][user UTF-8][gist-id bytes][SHA bytes], base64url, no padding.
+// Deliberately does NO validation, so tests can craft malformed tokens.
+function encodeToken(user, gist, sha) {
+  const hexToBytes = (h) => {
+    const a = [];
+    for (let i = 0; i < h.length; i += 2) a.push(parseInt(h.substr(i, 2), 16));
+    return a;
+  };
+  const ub = [...Buffer.from(user, 'utf8')];
+  const bytes = [ub.length, ...ub, ...hexToBytes(gist), ...hexToBytes(sha)];
+  return Buffer.from(bytes).toString('base64url');
+}
+
+// The public path is a single opaque token. `filename` is accepted but ignored
+// (it's constant now), so the handler call sites below need no changes.
+function pathFor(user, gist, sha, _filename) {
+  return `/${encodeToken(user, gist, sha)}`;
 }
 
 const GENERATOR_META = '<meta name="generator" content="parfait/1">';
@@ -162,6 +179,33 @@ describe('parsePath — accept', () => {
     const result = parsePath(pathFor('OctoCat', GIST_32, SHA_40, FILENAME));
     assert.equal(result.user, 'octocat');
   });
+
+  // Cross-language wire-format lock: these exact tokens are the goldens in
+  // Tests/ParfaitTests/GitHubGistTests.swift. If the app's encoder changes,
+  // both must change together.
+  test('decodes the app golden 32-hex token', () => {
+    assert.deepEqual(
+      parsePath('/C2NvbnJhZC12YW5sASNFZ4mrze8BI0VniavN76vN7wEjRWeJq83vASNFZ4mrze8B'),
+      {
+        user: 'conrad-vanl',
+        gistId: '0123456789abcdef0123456789abcdef',
+        sha: 'abcdef0123456789abcdef0123456789abcdef01',
+        filename: 'meeting.html',
+      }
+    );
+  });
+
+  test('decodes the app golden 20-hex token', () => {
+    assert.deepEqual(
+      parsePath('/C2NvbnJhZC12YW5sASNFZ4mrze8BI6vN7wEjRWeJq83vASNFZ4mrze8B'),
+      {
+        user: 'conrad-vanl',
+        gistId: '0123456789abcdef0123',
+        sha: 'abcdef0123456789abcdef0123456789abcdef01',
+        filename: 'meeting.html',
+      }
+    );
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -169,32 +213,36 @@ describe('parsePath — accept', () => {
 // ---------------------------------------------------------------------------
 
 describe('parsePath — reject', () => {
-  test('missing /raw/ segment', () => {
-    assert.equal(parsePath(`/${USER}/${GIST_32}/${SHA_40}/${FILENAME}`), null);
+  test('multi-segment path (old raw-URL shape) rejected', () => {
+    assert.equal(parsePath(`/${USER}/${GIST_32}/raw/${SHA_40}/${FILENAME}`), null);
+    assert.equal(parsePath(`/${USER}/${GIST_32}/${SHA_40}`), null);
   });
 
-  test('.htm extension rejected', () => {
-    assert.equal(parsePath(pathFor(USER, GIST_32, SHA_40, 'notes.htm')), null);
+  test('non-base64url characters rejected', () => {
+    assert.equal(parsePath('/has.dot'), null);
+    assert.equal(parsePath('/has+plus'), null);
+    assert.equal(parsePath('/'), null);
   });
 
-  test('no extension rejected', () => {
-    assert.equal(parsePath(pathFor(USER, GIST_32, SHA_40, 'notes')), null);
+  test('token too short to hold coordinates rejected', () => {
+    assert.equal(parsePath('/AAAA'), null); // decodes to 3 zero bytes: userLen 0
   });
 
-  test('39-hex sha rejected (must be exactly 40)', () => {
-    assert.equal(parsePath(pathFor(USER, GIST_32, 'c'.repeat(39), FILENAME)), null);
+  test('invalid base64 length rejected', () => {
+    assert.equal(parsePath('/A'), null); // 1 char -> remainder 1, impossible
   });
 
-  test('33-hex gist id rejected (cap is 32)', () => {
-    assert.equal(parsePath(pathFor(USER, 'a'.repeat(33), SHA_40, FILENAME)), null);
+  test('decoded username with an illegal character rejected', () => {
+    assert.equal(parsePath(pathFor('bad/user', GIST_32, SHA_40)), null);
+    assert.equal(parsePath(pathFor('bad.user', GIST_32, SHA_40)), null);
   });
 
-  test('traversal attempt in filename rejected', () => {
-    assert.equal(parsePath(pathFor(USER, GIST_32, SHA_40, '../../../etc/passwd.html')), null);
+  test('over-long gist id (34 hex > 32 cap) rejected', () => {
+    assert.equal(parsePath(pathFor(USER, 'a'.repeat(34), SHA_40)), null);
   });
 
-  test('empty filename rejected', () => {
-    assert.equal(parsePath(pathFor(USER, GIST_32, SHA_40, '.html')), null);
+  test('too-short gist id (18 hex < 20 floor) rejected', () => {
+    assert.equal(parsePath(pathFor(USER, 'a'.repeat(18), SHA_40)), null);
   });
 });
 

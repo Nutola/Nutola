@@ -4,9 +4,24 @@
 // dependencies. See docs/plans/2026-07-09-parfait-to-notes-cdn.md (the
 // "Synthesis notes" blockquote at the top overrides the body) for the
 // authoritative spec this implements.
+//
+// NOTE (2026-07-09): the public URL scheme was changed from the doc's
+// /user/gistId/raw/sha/file.html path to a single opaque base64url token
+// (see parsePath + Sources/Parfait/Publish/GistLinkToken.swift) so the link
+// no longer exposes the GitHub username or gist path. The upstream fetch,
+// validation, and caching are otherwise unchanged.
 
-const PATH_REGEX =
-  /^\/([A-Za-z0-9-]{1,39})\/([0-9a-f]{20,32})\/raw\/([0-9a-f]{40})\/([A-Za-z0-9._-]{1,120}\.html)$/;
+// The public URL is a single opaque base64url token the Parfait app produces
+// (Sources/Parfait/Publish/GistLinkToken.swift). It packs the gist coordinates
+// so the GitHub username and gist path never appear in the link. We decode it
+// back to (user, gist id, commit SHA) and reattach the constant filename before
+// fetching upstream. Byte layout: [1B user length][user][gist-id bytes][20B SHA]
+// — the SHA is the fixed-length tail, so the gist id needs no length prefix.
+const TOKEN_REGEX = /^\/([A-Za-z0-9_-]{1,512})$/;
+const FILENAME = 'meeting.html';
+const USER_REGEX = /^[a-z0-9-]{1,39}$/; // checked after lowercasing
+const GIST_ID_REGEX = /^[0-9a-f]{20,32}$/;
+const SHA_REGEX = /^[0-9a-f]{40}$/;
 
 const SIZE_CAP_BYTES = 2 * 1024 * 1024; // 2 MiB
 
@@ -43,15 +58,61 @@ export const SECURITY_HEADERS = {
 };
 
 /**
- * Parse and validate a request path against the gist raw-URL shape.
- * Returns { user, gistId, sha, filename } with `user` already lowercased,
- * or null if the path doesn't match.
+ * Reads a base64url token (no padding) into raw bytes, or null if it isn't
+ * valid base64url. Tolerant of missing padding; rejects impossible lengths.
+ */
+function base64UrlToBytes(token) {
+  let b64 = token.replace(/-/g, '+').replace(/_/g, '/');
+  const remainder = b64.length % 4;
+  if (remainder === 1) return null; // never a valid base64 length
+  if (remainder !== 0) b64 += '='.repeat(4 - remainder);
+  let binary;
+  try {
+    binary = atob(b64);
+  } catch {
+    return null;
+  }
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
+
+function bytesToHex(bytes) {
+  let hex = '';
+  for (const b of bytes) hex += b.toString(16).padStart(2, '0');
+  return hex;
+}
+
+/**
+ * Decode and validate the opaque link token. Returns
+ * { user, gistId, sha, filename } with `user` lowercased, or null if the token
+ * is malformed or decodes to coordinates that fail the strict charset/length
+ * checks. Those checks also close any SSRF path: the upstream URL we build only
+ * ever contains validated lowercase-hex plus a [a-z0-9-] username.
  */
 export function parsePath(pathname) {
-  const m = PATH_REGEX.exec(pathname);
+  const m = TOKEN_REGEX.exec(pathname);
   if (!m) return null;
-  const [, userRaw, gistId, sha, filename] = m;
-  return { user: userRaw.toLowerCase(), gistId, sha, filename };
+  const bytes = base64UrlToBytes(m[1]);
+  if (!bytes || bytes.length < 1) return null;
+  const userLen = bytes[0];
+  // Need: length byte + >=1 user byte + >=1 gist byte + 20 SHA bytes.
+  if (userLen < 1 || bytes.length < 1 + userLen + 1 + 20) return null;
+  let user;
+  try {
+    user = new TextDecoder('utf-8', { fatal: true })
+      .decode(bytes.subarray(1, 1 + userLen))
+      .toLowerCase();
+  } catch {
+    return null;
+  }
+  const rest = bytes.subarray(1 + userLen);
+  const gistId = bytesToHex(rest.subarray(0, rest.length - 20));
+  const sha = bytesToHex(rest.subarray(rest.length - 20));
+  if (!USER_REGEX.test(user) || !GIST_ID_REGEX.test(gistId) || !SHA_REGEX.test(sha)) {
+    return null;
+  }
+  return { user, gistId, sha, filename: FILENAME };
 }
 
 /**

@@ -42,15 +42,28 @@ enum GitHubGist {
 
     static var isAvailable: Bool { discover() != nil }
 
-    /// Derives a rendered-HTML URL from a gist's raw URL by swapping the host to
-    /// notes.parfait.to — the path (including the SHA-pinned /raw/ segment) is
-    /// preserved byte-for-byte. See docs/plans/2026-07-09-parfait-to-notes-cdn.md.
+    /// Derives the shareable notes.parfait.to link from a gist's raw URL. The raw
+    /// URL's (user, gist id, commit SHA) are packed into one opaque base64url token
+    /// (see GistLinkToken) so the published link is just notes.parfait.to/<token> —
+    /// the GitHub username and gist path never appear. The Worker decodes the token
+    /// before fetching upstream. Returns nil unless the input is the expected
+    /// gist.githubusercontent.com raw-URL shape.
     static func renderedURL(fromRaw raw: String) -> URL? {
-        guard !raw.isEmpty else { return nil }
-        let target = raw.replacingOccurrences(
-            of: "gist.githubusercontent.com", with: "notes.parfait.to")
-        return URL(string: target)
+        let range = NSRange(raw.startIndex..., in: raw)
+        guard let match = rawGistURLPattern.firstMatch(in: raw, range: range),
+              let userRange = Range(match.range(at: 1), in: raw),
+              let gistRange = Range(match.range(at: 2), in: raw),
+              let shaRange = Range(match.range(at: 3), in: raw),
+              let token = GistLinkToken.encode(
+                  user: String(raw[userRange]),
+                  gistID: String(raw[gistRange]),
+                  sha: String(raw[shaRange]))
+        else { return nil }
+        return URL(string: "https://notes.parfait.to/\(token)")
     }
+
+    private static let rawGistURLPattern = try! NSRegularExpression(
+        pattern: #"^https://gist\.githubusercontent\.com/([A-Za-z0-9-]{1,39})/([0-9a-f]{20,32})/raw/([0-9a-f]{40})/[^/]+$"#)
 
     /// Creates a secret gist — unlisted, NOT private: anyone with the link can read it —
     /// and derives a rendered-HTML URL by host-swapping the commit-SHA-pinned raw URL
