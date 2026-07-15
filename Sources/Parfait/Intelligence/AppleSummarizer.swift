@@ -139,8 +139,8 @@ enum AppleSummarizer {
     }
 
     private static var inputBudgetChars: Int {
-        // contextSize is @backDeployed to 26.0 (fallback 4096) — don't hardcode.
-        Int(Double(SystemLanguageModel.default.contextSize) * 0.55 * 3.5)
+        // On-device model context is 4096 tokens (TN3193). contextSize is only in macOS 26.4+ SDK.
+        Int(Double(4096) * 0.55 * 3.5)
     }
 
     private static func ensureAvailable() throws {
