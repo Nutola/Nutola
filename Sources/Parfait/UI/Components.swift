@@ -375,6 +375,7 @@ enum MeetingListMetadata {
 private struct MeetingRowButtonStyle: ButtonStyle {
     @Environment(\.colorScheme) private var scheme
     var isHovered: Bool
+    var isFailed: Bool = false
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
@@ -382,13 +383,19 @@ private struct MeetingRowButtonStyle: ButtonStyle {
             .padding(.vertical, 10)
             .background {
                 RoundedRectangle(cornerRadius: 10)
-                    .fill(isHighlighted(configuration) ? Theme.chip(scheme) : Color.clear)
+                    .fill(backgroundColor(configuration))
             }
             .contentShape(RoundedRectangle(cornerRadius: 10))
     }
 
-    private func isHighlighted(_ configuration: Configuration) -> Bool {
-        configuration.isPressed || isHovered
+    private func backgroundColor(_ configuration: Configuration) -> Color {
+        if isFailed {
+            return Color.orange.opacity(scheme == .dark ? 0.12 : 0.08)
+        }
+        if configuration.isPressed || isHovered {
+            return Theme.chip(scheme)
+        }
+        return Color.clear
     }
 }
 
@@ -402,12 +409,16 @@ struct MeetingHistoryRow: View {
 
     private var metadata: MeetingListMetadata? { MeetingListMetadata.from(meeting) }
 
+    private var displayTitle: String {
+        meeting.calendarEventTitle ?? meeting.title
+    }
+
     var body: some View {
         Button(action: action) {
             HStack(alignment: .center, spacing: 12) {
                 VStack(alignment: .leading, spacing: 5) {
                     HStack(alignment: .firstTextBaseline, spacing: 6) {
-                        Text(meeting.title)
+                        Text(displayTitle)
                             .font(.parfait(14, .medium))
                             .foregroundStyle(Theme.heading(scheme))
                             .lineLimit(2)
@@ -448,7 +459,9 @@ struct MeetingHistoryRow: View {
                     .frame(width: 10)
             }
         }
-        .buttonStyle(MeetingRowButtonStyle(isHovered: isHovered))
+        .buttonStyle(MeetingRowButtonStyle(
+            isHovered: isHovered,
+            isFailed: meeting.state == .failed))
         .onHover { isHovered = $0 }
     }
 }

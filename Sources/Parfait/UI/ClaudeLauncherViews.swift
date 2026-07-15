@@ -45,7 +45,7 @@ struct LibraryLauncherView: View {
     var body: some View {
         AILauncherView(
             headline: "Hi \(UserGreeting.firstName), ask anything",
-            subtitle: "Search across your whole meeting library through the parfait connector.",
+            subtitle: "Ask questions across all your recorded meetings.",
             suggestions: MeetingAISuggestions.library,
             recentMeetings: recentMeetings,
             promptBuilder: { question in
@@ -67,7 +67,7 @@ struct LibraryLauncherView: View {
                 }
             }
         )
-        .navigationTitle("Ask your meetings")
+        .navigationTitle("Ask")
     }
 }
 
@@ -98,15 +98,34 @@ struct AILauncherView: View {
     @Environment(\.colorScheme) private var scheme
     @Environment(\.parfaitActionColor) private var actionColor
 
+    private var isConversationMode: Bool {
+        !messages.isEmpty
+    }
+
     var body: some View {
+        Group {
+            if isConversationMode {
+                conversationBody
+            } else {
+                launcherBody
+            }
+        }
+        .background(Theme.surface(scheme))
+        .onAppear { refreshAvailability() }
+        .onChange(of: preferredAIProvider) {
+            refreshAvailability()
+            if isAnswering { stopAnswering() }
+        }
+        .onChange(of: askDeliveryMode) {
+            refreshAvailability()
+            if isAnswering { stopAnswering() }
+        }
+    }
+
+    private var launcherBody: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 28) {
                 header
-
-                if !messages.isEmpty {
-                    chatSection
-                }
-
                 composeHero
 
                 if showsLongTranscriptHint {
@@ -127,16 +146,56 @@ struct AILauncherView: View {
             .padding(.vertical, 44)
             .contentColumn()
         }
-        .background(Theme.surface(scheme))
-        .onAppear { refreshAvailability() }
-        .onChange(of: preferredAIProvider) {
-            refreshAvailability()
-            if isAnswering { stopAnswering() }
+    }
+
+    private var conversationBody: some View {
+        VStack(spacing: 0) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    conversationHeader
+                    chatSection
+                }
+                .padding(.horizontal, 32)
+                .padding(.top, 32)
+                .padding(.bottom, 16)
+                .contentColumn()
+            }
+
+            VStack(alignment: .leading, spacing: 12) {
+                composeHero
+
+                if showsLongTranscriptHint {
+                    longTranscriptHint
+                }
+
+                footerNotices
+            }
+            .padding(.horizontal, 32)
+            .padding(.bottom, 24)
+            .contentColumn()
         }
-        .onChange(of: askDeliveryMode) {
-            refreshAvailability()
-            if isAnswering { stopAnswering() }
+    }
+
+    private var conversationHeader: some View {
+        HStack(alignment: .center) {
+            Text(headline)
+                .font(.parfait(20, .bold))
+                .foregroundStyle(Theme.heading(scheme))
+                .lineLimit(1)
+            Spacer(minLength: 12)
+            Button("New conversation", action: newConversation)
+                .font(.parfait(12, .medium))
+                .buttonStyle(.plain)
+                .foregroundStyle(actionColor)
         }
+    }
+
+    private func newConversation() {
+        stopAnswering()
+        messages = []
+        input = ""
+        launchFailed = false
+        composeFocused = true
     }
 
     private func refreshAvailability() {

@@ -14,8 +14,8 @@ enum Theme {
     static let cocoa = Color(red: 0.263, green: 0.196, blue: 0.169)         // #43322B text
 
     static let cornerRadius: CGFloat = 16
-    /// Main feed column width — matches Granola's centered content layout.
-    static let contentMaxWidth: CGFloat = 800
+    /// Main feed column width — widened to use more of the detail pane.
+    static let contentMaxWidth: CGFloat = 960
 
     /// User-configurable accent for prominent actions (Record, Save, Stop, …).
     static var action: Color {
@@ -27,7 +27,7 @@ enum Theme {
         scheme == .dark ? Color(red: 0.09, green: 0.09, blue: 0.09) : cream
     }
     static func card(_ scheme: ColorScheme) -> Color {
-        scheme == .dark ? Color(red: 0.14, green: 0.14, blue: 0.14) : creamDeep
+        scheme == .dark ? Color(red: 0.17, green: 0.17, blue: 0.17) : creamDeep
     }
 
     /// Floating panel and transcript overlay surfaces (Granola-style).
@@ -251,10 +251,10 @@ extension View {
         modifier(ParfaitAppearanceModifier())
     }
 
-    /// Constrain and center main content within the detail pane (Granola-style).
+    /// Constrain main content within the detail pane, left-aligned.
     func contentColumn(alignment: Alignment = .leading) -> some View {
         frame(maxWidth: Theme.contentMaxWidth, alignment: alignment)
-            .frame(maxWidth: .infinity)
+            .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 

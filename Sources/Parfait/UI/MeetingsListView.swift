@@ -5,8 +5,18 @@ struct MeetingsListView: View {
     @Environment(\.colorScheme) private var scheme
     @Environment(\.parfaitActionColor) private var actionColor
 
+    @State private var searchQuery = ""
+    @FocusState private var searchFocused: Bool
+
     private var groups: [MeetingDayGroup] {
         MeetingDayGrouper.group(meetings: app.store.meetings)
+    }
+
+    private var filteredGroups: [MeetingDayGroup] {
+        let query = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return groups }
+        let filtered = app.store.meetings.filter { MeetingSearch.matches($0, query: query) }
+        return MeetingDayGrouper.group(meetings: filtered)
     }
 
     var body: some View {
@@ -16,20 +26,26 @@ struct MeetingsListView: View {
                     .font(.parfait(22, .bold))
                     .foregroundStyle(Theme.heading(scheme))
 
+                searchField
+
                 if groups.isEmpty {
                     EmptyStateView(
                         title: "No meetings yet",
                         message: "Recorded meetings will appear here.")
+                } else if filteredGroups.isEmpty {
+                    EmptyStateView(
+                        title: "No matches",
+                        message: "Try a different title, attendee, or calendar event name.")
                 } else {
                     VStack(alignment: .leading, spacing: 20) {
-                        ForEach(groups) { group in
+                        ForEach(filteredGroups) { group in
                             VStack(alignment: .leading, spacing: 8) {
                                 HStack(spacing: 8) {
                                     Text(group.label)
                                         .font(.parfait(15, .semibold))
                                         .foregroundStyle(Theme.sectionTitle(scheme, accent: actionColor))
                                     Text("\(group.meetings.count)")
-                                        .font(.parfait(11, .medium))
+                                        .font(.parfait(12, .medium))
                                         .foregroundStyle(Theme.tertiary(scheme))
                                         .padding(.horizontal, 7)
                                         .padding(.vertical, 2)
@@ -55,5 +71,63 @@ struct MeetingsListView: View {
             .contentColumn()
         }
         .background(Theme.surface(scheme))
+        .onAppear { searchFocused = false }
+        .background {
+            Button("Search") { searchFocused = true }
+                .keyboardShortcut("f", modifiers: .command)
+                .hidden()
+        }
+    }
+
+    private var searchField: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(searchFocused ? actionColor : Theme.secondary(scheme))
+
+            TextField("Search meetings…", text: $searchQuery)
+                .textFieldStyle(.plain)
+                .font(.parfait(14))
+                .focused($searchFocused)
+
+            if !searchQuery.isEmpty {
+                Button {
+                    searchQuery = ""
+                    searchFocused = true
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 13))
+                        .foregroundStyle(Theme.tertiary(scheme))
+                }
+                .buttonStyle(.plain)
+                .help("Clear search")
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
+        .background(Theme.card(scheme), in: RoundedRectangle(cornerRadius: 10))
+        .overlay {
+            RoundedRectangle(cornerRadius: 10)
+                .strokeBorder(
+                    searchFocused ? actionColor.opacity(0.45) : Color.primary.opacity(0.08),
+                    lineWidth: searchFocused ? 1.5 : 1)
+        }
+    }
+}
+
+enum MeetingSearch {
+    static func matches(_ meeting: Meeting, query: String) -> Bool {
+        let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !q.isEmpty else { return true }
+        if meeting.title.localizedCaseInsensitiveContains(q) { return true }
+        if let calendar = meeting.calendarEventTitle,
+           calendar.localizedCaseInsensitiveContains(q) { return true }
+        if meeting.attendees.contains(where: { $0.localizedCaseInsensitiveContains(q) }) {
+            return true
+        }
+        if let source = meeting.sourceApp, source.localizedCaseInsensitiveContains(q) {
+            return true
+        }
+        return false
     }
 }

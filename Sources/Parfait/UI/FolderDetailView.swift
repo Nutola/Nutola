@@ -11,6 +11,7 @@ struct FolderDetailView: View {
     @State private var descriptionText: String
     @State private var showDeleteConfirm = false
     @State private var showIconEditor = false
+    @State private var showAddExisting = false
     @FocusState private var editingName: Bool
     @FocusState private var editingDescription: Bool
 
@@ -56,6 +57,12 @@ struct FolderDetailView: View {
             }
         } message: {
             Text("Meetings in this folder will move back to the Meetings list. Nothing is deleted.")
+        }
+        .sheet(isPresented: $showAddExisting) {
+            AddMeetingToFolderSheet(folderID: folderID) { meetingID in
+                app.folders.assign(meetingID: meetingID, to: folderID, meetingStore: app.store)
+            }
+            .environmentObject(app)
         }
         .sheet(isPresented: $showIconEditor) {
             if let folder {
@@ -137,17 +144,17 @@ struct FolderDetailView: View {
     private var notesSection: some View {
         VStack(alignment: meetings.isEmpty ? .center : .leading, spacing: 12) {
             HStack {
-                Text("Notes")
+                Text("Meetings")
                     .font(.parfait(15, .semibold))
                     .foregroundStyle(Theme.sectionTitle(scheme, accent: actionColor))
                 Spacer()
-                addExistingMenu
+                addExistingButton
             }
 
             if meetings.isEmpty {
                 EmptyStateView(
-                    title: "No notes yet",
-                    message: "Record a meeting or add an existing one.")
+                    title: "No meetings yet",
+                    message: "Record a meeting or add an existing one from your library.")
             } else {
                 VStack(spacing: 0) {
                     ForEach(meetings) { meeting in
@@ -166,24 +173,12 @@ struct FolderDetailView: View {
             alignment: meetings.isEmpty ? .center : .leading)
     }
 
-    private var addExistingMenu: some View {
+    private var addExistingButton: some View {
         let unfiled = app.store.meetings.filter { $0.folderID == nil }
-        return Menu {
-            if unfiled.isEmpty {
-                Button("No unfiled meetings") {}
-                    .disabled(true)
-            } else {
-                ForEach(unfiled.prefix(30)) { meeting in
-                    Button(meeting.title) {
-                        app.folders.assign(
-                            meetingID: meeting.id, to: folderID, meetingStore: app.store)
-                    }
-                }
-            }
-        } label: {
-            Text("Add existing")
-                .font(.parfait(12, .medium))
+        return Button("Add existing") {
+            showAddExisting = true
         }
+        .font(.parfait(12, .medium))
         .disabled(unfiled.isEmpty)
     }
 
@@ -264,5 +259,99 @@ struct FolderDetailView: View {
         guard newDesc != f.description else { return }
         f.description = newDesc
         app.folders.updateFolder(f)
+    }
+}
+
+private struct AddMeetingToFolderSheet: View {
+    @EnvironmentObject private var app: AppState
+    @Environment(\.colorScheme) private var scheme
+    @Environment(\.dismiss) private var dismiss
+
+    let folderID: UUID
+    let onSelect: (UUID) -> Void
+
+    @State private var searchQuery = ""
+    @FocusState private var searchFocused: Bool
+
+    private var unfiledMeetings: [Meeting] {
+        app.store.meetings
+            .filter { $0.folderID == nil }
+            .sorted { $0.createdAt > $1.createdAt }
+    }
+
+    private var filteredMeetings: [Meeting] {
+        let query = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return unfiledMeetings }
+        return unfiledMeetings.filter { MeetingSearch.matches($0, query: query) }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("Add to folder")
+                .font(.parfait(13, .semibold))
+                .foregroundStyle(Theme.heading(scheme))
+                .padding(.horizontal, 16)
+                .padding(.top, 16)
+                .padding(.bottom, 10)
+
+            HStack(spacing: 8) {
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(Theme.secondary(scheme))
+                TextField("Search meetings…", text: $searchQuery)
+                    .textFieldStyle(.plain)
+                    .font(.parfait(13))
+                    .focused($searchFocused)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .background(Theme.card(scheme), in: RoundedRectangle(cornerRadius: 8))
+            .padding(.horizontal, 16)
+            .padding(.bottom, 10)
+
+            Divider()
+
+            if filteredMeetings.isEmpty {
+                Text(
+                    searchQuery.isEmpty
+                        ? "No unfiled meetings."
+                        : "No meetings match your search.")
+                    .font(.parfait(13))
+                    .foregroundStyle(Theme.secondary(scheme))
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                List(filteredMeetings) { meeting in
+                    Button {
+                        onSelect(meeting.id)
+                        dismiss()
+                    } label: {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(meeting.calendarEventTitle ?? meeting.title)
+                                .font(.parfait(13, .medium))
+                                .foregroundStyle(Theme.heading(scheme))
+                                .lineLimit(2)
+                            Text(meeting.createdAt.formatted(date: .abbreviated, time: .shortened))
+                                .font(.parfait(11))
+                                .foregroundStyle(Theme.secondary(scheme))
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .buttonStyle(.plain)
+                }
+                .listStyle(.plain)
+            }
+
+            Divider()
+
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+            }
+            .padding(12)
+        }
+        .frame(width: 420, height: 480)
+        .background(Theme.surface(scheme))
+        .onAppear { searchFocused = true }
     }
 }

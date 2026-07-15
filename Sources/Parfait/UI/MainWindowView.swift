@@ -55,7 +55,7 @@ struct MainWindowView: View {
         switch selection {
         case .home: "Coming up"
         case .meetings: "Meetings"
-        case .library: "Ask your meetings"
+        case .library: "Ask"
         case .folder(let id):
             app.folders.folder(id: id)?.name ?? "Folder"
         case nil: "Back"
@@ -85,7 +85,7 @@ struct MainWindowView: View {
             Label("Meetings", systemImage: "list.bullet.rectangle")
                 .font(.parfait(13, .medium))
                 .tag(SidebarItem.meetings)
-            Label("Ask your meetings", systemImage: "bubble.left.and.text.bubble.right")
+            Label("Ask", systemImage: "bubble.left.and.text.bubble.right")
                 .font(.parfait(13, .medium))
                 .tag(SidebarItem.library)
         }
@@ -101,7 +101,7 @@ struct MainWindowView: View {
                 showNewFolder = true
             } label: {
                 Label("New folder", systemImage: "plus")
-                    .font(.parfait(13))
+                    .font(.parfait(13, .medium))
                     .foregroundStyle(Theme.secondary(scheme))
             }
             .buttonStyle(.plain)
