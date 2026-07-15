@@ -20,12 +20,18 @@ final class AppState: NSObject, ObservableObject {
 
     let store = MeetingStore()
     let templates = TemplateStore()
+    let calendar = CalendarStore()
+    let folders = MeetingFolderStore()
 
     @Published private(set) var session: RecordingSession?
     @Published private(set) var recordingMeeting: Meeting?
     /// The floating recording card is hidden because the user closed it. Reset on
     /// each new recording; re-openable from the menu bar.
     @Published var recordingCardDismissed = false
+    /// Collapsed to the compact pill handle (Granola-style). Reset on each new recording.
+    @Published var recordingCardMinimized = true
+    /// User preference — when false, the floating live transcript never appears.
+    @Published var showLiveRecordingCard = AppSettings.showLiveRecordingCard
     /// meeting id → human-readable pipeline stage, while processing.
     @Published private(set) var processingStage: [UUID: String] = [:]
     /// meeting id → notes being streamed in right now. The Notes tab shows this in
@@ -67,14 +73,29 @@ final class AppState: NSObject, ObservableObject {
     private var isStartingRecording = false
     private var cancellables = Set<AnyCancellable>()
 
+    func meetingForCalendarEvent(_ eventID: String) -> Meeting? {
+        store.meetings
+            .filter { $0.calendarEventID == eventID }
+            .max(by: { $0.createdAt < $1.createdAt })
+    }
+
     var isRecording: Bool { session != nil }
 
     private override init() {
         super.init()
         AppSettings.registerDefaults()
+        // Property initializers run before init(), so UserDefaults-backed prefs read
+        // false until registerDefaults() — refresh so the floating card matches Settings.
+        showLiveRecordingCard = AppSettings.showLiveRecordingCard
         // Views observe AppState; meeting data lives on the nested store.
         // Forward its change signal or store-only mutations never refresh UI.
         store.objectWillChange
+            .sink { [weak self] _ in self?.objectWillChange.send() }
+            .store(in: &cancellables)
+        calendar.objectWillChange
+            .sink { [weak self] _ in self?.objectWillChange.send() }
+            .store(in: &cancellables)
+        folders.objectWillChange
             .sink { [weak self] _ in self?.objectWillChange.send() }
             .store(in: &cancellables)
     }
@@ -92,6 +113,7 @@ final class AppState: NSObject, ObservableObject {
         Task { @MainActor in
             await Task.detached { SystemAudioTap.destroyLeftoverAggregates() }.value
             if AppSettings.detectMeetings { startDetection() }
+            await calendar.refreshAgenda()
         }
     }
 
@@ -200,7 +222,11 @@ final class AppState: NSObject, ObservableObject {
         await startRecording(sourceApp: name, trigger: event)
     }
 
-    func startRecording(sourceApp: String? = nil, trigger: MicEvent? = nil) async {
+    func startRecording(
+        sourceApp: String? = nil,
+        trigger: MicEvent? = nil,
+        calendarEvent: CalendarEventSummary? = nil
+    ) async {
         guard !isRecording, !isStartingRecording else { return }
         isStartingRecording = true
         defer { isStartingRecording = false }
@@ -219,11 +245,26 @@ final class AppState: NSObject, ObservableObject {
         meeting.sourceApp = sourceApp
         meeting.templateName = AppSettings.defaultTemplate
 
-        if AppSettings.useCalendar, CalendarMatcher.isAuthorized,
-           let event = await CalendarMatcher.currentEvent() {
+        if let calendarEvent {
+            meeting.title = calendarEvent.title
+            meeting.calendarEventTitle = calendarEvent.title
+            meeting.attendees = calendarEvent.attendees
+            meeting.calendarEventID = calendarEvent.id
+            meeting.calendarEventStart = calendarEvent.start
+            meeting.calendarEventEnd = calendarEvent.end
+        } else if AppSettings.useCalendar, CalendarAuthorization.isAuthorized,
+                  let event = await calendar.currentEvent(at: .now, sourceApp: sourceApp) {
             meeting.title = event.title
             meeting.calendarEventTitle = event.title
             meeting.attendees = event.attendees
+            meeting.calendarEventID = event.id
+            meeting.calendarEventStart = event.start
+            meeting.calendarEventEnd = event.end
+        }
+
+        if let title = meeting.calendarEventTitle,
+           let folder = folders.folder(forTitle: title) {
+            meeting.folderID = folder.id
         }
 
         // A competing start may have won while we awaited the dialogs above.
@@ -251,6 +292,7 @@ final class AppState: NSObject, ObservableObject {
         store.upsert(meeting)
         recordingMeeting = meeting
         recordingCardDismissed = false // a fresh recording shows the card
+        recordingCardMinimized = true
         session = newSession
     }
 
@@ -276,6 +318,100 @@ final class AppState: NSObject, ObservableObject {
         store.delete(id: meeting.id)
     }
 
+    /// Opens an upcoming calendar event for prep (side notes) or its existing meeting.
+    func openCalendarEvent(_ event: CalendarEventSummary) {
+        if let existing = meetingForCalendarEvent(event.id) {
+            openMeetingID = existing.id
+        } else {
+            Task { await prepareMeeting(calendarEvent: event) }
+        }
+    }
+
+    /// Creates a meeting folder and metadata for an upcoming event without starting capture.
+    func prepareMeeting(calendarEvent: CalendarEventSummary) async {
+        var meeting = Meeting(title: calendarEvent.title, createdAt: Date())
+        meeting.state = .prep
+        meeting.calendarEventTitle = calendarEvent.title
+        meeting.attendees = calendarEvent.attendees
+        meeting.calendarEventID = calendarEvent.id
+        meeting.calendarEventStart = calendarEvent.start
+        meeting.calendarEventEnd = calendarEvent.end
+        meeting.templateName = AppSettings.defaultTemplate
+
+        if let title = meeting.calendarEventTitle,
+           let folder = folders.folder(forTitle: title) {
+            meeting.folderID = folder.id
+        }
+
+        let archive = store.archive
+        do {
+            try archive.createFolder(for: meeting.id)
+        } catch {
+            lastError = error.localizedDescription
+            return
+        }
+        store.upsert(meeting)
+        openMeetingID = meeting.id
+    }
+
+    /// Resume capture on an existing meeting — retries a failed/empty capture,
+    /// appends new audio to a finished meeting, or starts capture from a prep meeting.
+    /// Reuses the same folder and calendar metadata; prior transcript and notes are kept
+    /// when appending.
+    func continueRecording(meetingID: UUID) async {
+        guard !isRecording, !isStartingRecording else { return }
+        guard var meeting = store.meeting(id: meetingID) else { return }
+        let fromPrep = meeting.canStartFromPrep(isRecording: false)
+        guard fromPrep || meeting.canContinueRecording(isRecording: false) else { return }
+
+        isStartingRecording = true
+        defer { isStartingRecording = false }
+        pendingAutoStop?.cancel()
+        pendingAutoStop = nil
+        detectedAppName = nil
+        pendingDetection = nil
+        pendingDetections.removeAll()
+        lastError = nil
+
+        if !MicRecorder.permissionGranted {
+            _ = await MicRecorder.requestPermission()
+        }
+        guard !isRecording else { return }
+
+        let archive = store.archive
+        if !fromPrep {
+            for url in [archive.micURL(for: meetingID), archive.systemURL(for: meetingID)] {
+                try? FileManager.default.removeItem(at: url)
+            }
+            archive.removeLiveTranscript(for: meetingID)
+        }
+
+        meeting.state = .recording
+        meeting.notice = nil
+        store.upsert(meeting)
+
+        let newSession = RecordingSession(
+            meetingID: meeting.id, archive: archive, elapsedOffset: meeting.duration)
+        do {
+            try newSession.start(
+                micURL: archive.micURL(for: meeting.id),
+                systemURL: archive.systemURL(for: meeting.id))
+        } catch {
+            meeting.state = .failed
+            meeting.notice = error.localizedDescription
+            store.upsert(meeting)
+            lastError = error.localizedDescription
+            return
+        }
+        meeting.notice = newSession.startupNotice
+        store.upsert(meeting)
+        recordingMeeting = meeting
+        recordingCardDismissed = false
+        recordingCardMinimized = true
+        session = newSession
+        openMeetingID = meeting.id
+    }
+
     private func clearRecordingState() {
         pendingAutoStop?.cancel()
         pendingAutoStop = nil
@@ -299,12 +435,15 @@ final class AppState: NSObject, ObservableObject {
         var entry = store.meeting(id: id) ?? meeting
         entry.state = .processing
         // Surface the live transcript immediately so the Transcript tab isn't blank
-        // while the accurate, diarized version is still being built. The batch pass
-        // overwrites both the transcript and the speakers when it finishes.
+        // while the accurate, diarized version is still being built. When resuming,
+        // merge onto any segments already on disk.
+        let existing = store.transcript(for: id)
         let live = store.archive.liveTranscript(for: id)
-        if !live.isEmpty, store.transcript(for: id).isEmpty {
-            try? store.archive.saveTranscript(live, for: id)
-            entry.speakers = LiveTranscriber.speakers
+        if !live.isEmpty {
+            let offset = Self.appendOffset(meeting: entry, prior: existing)
+            let merged = existing + Self.offsetSegments(live, by: offset)
+            try? store.archive.saveTranscript(merged, for: id)
+            if existing.isEmpty { entry.speakers = LiveTranscriber.speakers }
         }
         store.upsert(entry)
         let titleAtEntry = entry.title
@@ -374,6 +513,22 @@ final class AppState: NSObject, ObservableObject {
         }
     }
 
+    private static func appendOffset(meeting: Meeting, prior: [TranscriptSegment]) -> TimeInterval {
+        guard !prior.isEmpty else { return 0 }
+        return max(meeting.duration, prior.map(\.end).max() ?? 0)
+    }
+
+    private static func offsetSegments(
+        _ segments: [TranscriptSegment], by offset: TimeInterval
+    ) -> [TranscriptSegment] {
+        segments.map { seg in
+            var s = seg
+            s.start += offset
+            s.end += offset
+            return s
+        }
+    }
+
     /// Failed meetings re-run the whole pipeline; ready ones just get a new
     /// summary + title.
     func retry(meetingID: UUID) async {
@@ -400,8 +555,11 @@ final class AppState: NSObject, ObservableObject {
         streamingSummaries[meetingID] = ""
         let segments = store.transcript(for: meetingID)
         let text = TranscriptFormatter.plainText(segments, speakers: entry.speakers)
+        let userNotes = store.sideNotes(for: meetingID)
         let titleAtEntry = entry.title
-        let outcome = await ProcessingPipeline.summarize(meeting: entry, transcript: text) { delta in
+        let outcome = await ProcessingPipeline.summarize(
+            meeting: entry, transcript: text, userNotes: userNotes
+        ) { delta in
             DispatchQueue.main.async {
                 MainActor.assumeIsolated { AppState.shared.streamingSummaries[meetingID] = delta }
             }

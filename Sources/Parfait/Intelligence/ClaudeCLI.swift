@@ -44,6 +44,8 @@ struct ClaudeCLI {
     // bootstrap() warms the full resolution in the background.
     private static let cacheLock = NSLock()
     nonisolated(unsafe) private static var cachedResolution: URL??
+    private static let processLock = NSLock()
+    nonisolated(unsafe) private static var runningProcess: Process?
 
     private static func fastProbe() -> URL? {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
@@ -131,6 +133,13 @@ struct ClaudeCLI {
         return (try? JSONDecoder().decode(AuthStatus.self, from: data))?.loggedIn ?? false
     }
 
+    static func cancelRunning() {
+        processLock.lock()
+        defer { processLock.unlock() }
+        runningProcess?.terminate()
+        runningProcess = nil
+    }
+
     static func run(
         prompt: String,
         stdin: String? = nil,
@@ -153,10 +162,20 @@ struct ClaudeCLI {
             mcpConfigJSON: mcpConfigJSON, maxTurns: maxTurns)
         process.currentDirectoryURL = workDir
 
-        let stdinPipe = Pipe()
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()
-        process.standardInput = stdinPipe
+        if let stdin {
+            let stdinPipe = Pipe()
+            process.standardInput = stdinPipe
+            let stdinData = Data(stdin.utf8)
+            DispatchQueue.global(qos: .utility).async {
+                let writer = stdinPipe.fileHandleForWriting
+                try? writer.write(contentsOf: stdinData)
+                try? writer.close()
+            }
+        } else {
+            process.standardInput = FileHandle.nullDevice
+        }
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
 
@@ -164,22 +183,27 @@ struct ClaudeCLI {
         async let stdoutData = readToEnd(stdoutPipe.fileHandleForReading)
         async let stderrData = readToEnd(stderrPipe.fileHandleForReading)
 
-        let stdinData = stdin.map { Data($0.utf8) }
         let status: Int32 = try await withCheckedThrowingContinuation { continuation in
-            process.terminationHandler = { continuation.resume(returning: $0.terminationStatus) }
+            processLock.lock()
+            runningProcess = process
+            processLock.unlock()
+
+            process.terminationHandler = { proc in
+                processLock.lock()
+                if runningProcess === proc { runningProcess = nil }
+                processLock.unlock()
+                continuation.resume(returning: proc.terminationStatus)
+            }
             do {
                 try process.run()
             } catch {
-                // Close write ends so the pipe readers see EOF instead of hanging.
+                processLock.lock()
+                if runningProcess === process { runningProcess = nil }
+                processLock.unlock()
                 try? stdoutPipe.fileHandleForWriting.close()
                 try? stderrPipe.fileHandleForWriting.close()
                 continuation.resume(throwing: ClaudeCLIError.failed(status: -1, stderr: error.localizedDescription))
                 return
-            }
-            DispatchQueue.global(qos: .utility).async {
-                let writer = stdinPipe.fileHandleForWriting
-                if let stdinData { try? writer.write(contentsOf: stdinData) }
-                try? writer.close()
             }
         }
 

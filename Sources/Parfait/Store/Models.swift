@@ -18,6 +18,8 @@ struct Speaker: Codable, Identifiable, Equatable, Sendable {
 }
 
 enum MeetingState: String, Codable, Sendable {
+    /// Created from an upcoming calendar event — notes can be prepped before recording.
+    case prep
     case recording
     case processing
     case ready
@@ -32,6 +34,9 @@ struct Meeting: Codable, Identifiable, Equatable, Sendable {
     /// App that triggered detection (e.g. "zoom.us"), if auto-detected.
     var sourceApp: String?
     var calendarEventTitle: String?
+    var calendarEventID: String?
+    var calendarEventStart: Date?
+    var calendarEventEnd: Date?
     /// Attendee names from the matched calendar event.
     var attendees: [String] = []
     var speakers: [Speaker] = []
@@ -42,6 +47,32 @@ struct Meeting: Codable, Identifiable, Equatable, Sendable {
     var publishedURL: String?
     /// Which engine produced the summary: "apple", "claude", or "codex".
     var summaryProvider: String?
+    /// User-assigned folder; nil = unfiled (flat Meetings list).
+    var folderID: UUID?
+}
+
+struct MeetingFolder: Codable, Identifiable, Equatable, Sendable {
+    var id: UUID = UUID()
+    var name: String
+    var description: String?
+    var createdAt: Date
+    var sortOrder: Int = 0
+    var iconKind: FolderIconKind = .symbol
+    /// SF Symbol name when `iconKind == .symbol`, emoji character when `.emoji`.
+    var iconValue: String = "folder.fill"
+    var iconColorHex: String = "#3FB27F"
+}
+
+enum FolderIconKind: String, Codable, Sendable {
+    case symbol
+    case emoji
+}
+
+/// Persisted mapping for auto-filing. Key is normalized calendar title.
+struct FolderTitleRule: Codable, Equatable, Sendable {
+    var normalizedTitle: String
+    var folderID: UUID
+    var updatedAt: Date
 }
 
 extension Meeting {
@@ -49,5 +80,31 @@ extension Meeting {
         let f = DateFormatter()
         f.dateFormat = "EEEE h:mm a"
         return "Meeting · \(f.string(from: date))"
+    }
+
+    /// Whether the user can pick up recording on this meeting again — after a failed
+    /// capture, an empty finish, or to append more audio to an existing meeting.
+    func canStartFromPrep(isRecording: Bool) -> Bool {
+        guard !isRecording else { return false }
+        return state == .prep
+    }
+
+    func canContinueRecording(isRecording: Bool) -> Bool {
+        guard !isRecording else { return false }
+        guard state != .recording, state != .processing, state != .prep else { return false }
+        return state == .failed || state == .ready
+    }
+
+    /// Human-readable source for list subtitles (bundle IDs → app names).
+    var displaySourceApp: String? {
+        guard let raw = sourceApp?.lowercased(), !raw.isEmpty else { return nil }
+        if raw.contains("granola") { return "Granola" }
+        if raw.contains("zoom") { return "Zoom" }
+        if raw.contains("teams") { return "Microsoft Teams" }
+        if raw.contains("meet") || raw.contains("google") { return "Google Meet" }
+        if raw.contains("webex") { return "Webex" }
+        if raw.contains("slack") { return "Slack" }
+        if raw.contains("facetime") { return "FaceTime" }
+        return sourceApp
     }
 }

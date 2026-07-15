@@ -112,6 +112,25 @@ enum AppleSummarizer {
         }
     }
 
+    /// Characters available for meeting context in ask prompts (~4k-token on-device model).
+    static var askContextBudgetChars: Int { inputBudgetChars - 400 }
+
+    static func answer(prompt: String, onDelta: (@Sendable (String) -> Void)? = nil) async throws -> String {
+        try ensureAvailable()
+        let model = transformationModel
+        let instructions = """
+        You are Parfait. Answer questions about the user's meetings using the meeting \
+        summaries in the prompt. Synthesize themes, decisions, and action items. Do not \
+        count meetings by time or list timestamps. Never say you will look up or fetch data. \
+        Be concise but substantive.
+        """
+        if let onDelta {
+            return try await streamOnce(
+                model: model, instructions: instructions, prompt: prompt, onDelta: onDelta)
+        }
+        return try await respondOnce(model: model, instructions: instructions, prompt: prompt)
+    }
+
     static func generateTitle(fromSummary summary: String) async throws -> String {
         try ensureAvailable()
         do {

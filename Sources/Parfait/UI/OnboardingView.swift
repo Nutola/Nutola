@@ -5,12 +5,13 @@ struct OnboardingView: View {
     @EnvironmentObject private var app: AppState
     @Environment(\.dismissWindow) private var dismissWindow
     @Environment(\.colorScheme) private var scheme
+    @Environment(\.parfaitActionColor) private var actionColor
     @AppStorage(SettingsKey.didCompleteOnboarding) private var didCompleteOnboarding = false
     @AppStorage(SettingsKey.systemAudioConfirmed) private var systemAudioConfirmed = false
     @State private var systemAudioStatus = SystemAudioPermission.status()
 
     @State private var micStatus = MicRecorder.permissionGranted
-    @State private var calendarStatus = CalendarMatcher.isAuthorized
+    @State private var calendarStatus = CalendarAuthorization.isAuthorized
     @State private var claudeInstalled = ClaudeCLI.isInstalled
     @State private var claudeLoggedIn = false
     @State private var claudeDesktopInstalled = ClaudeDesktop.isInstalled
@@ -21,6 +22,7 @@ struct OnboardingView: View {
             VStack(spacing: 6) {
                 ParfaitStripes()
                 Text("Welcome to Parfait").font(.parfait(20, .bold))
+                    .foregroundStyle(Theme.heading(scheme))
                 Text("A quick, optional setup — you can change any of this later in Settings.")
                     .font(.parfait(12)).foregroundStyle(.secondary)
                     .multilineTextAlignment(.center).frame(maxWidth: 380)
@@ -45,7 +47,7 @@ struct OnboardingView: View {
                 Spacer()
                 Button("Finish") { finish() }
                     .buttonStyle(.borderedProminent)
-                    .tint(Theme.raspberry)
+                    .tint(actionColor)
                     .keyboardShortcut(.defaultAction)
             }
             .padding(16)
@@ -55,7 +57,7 @@ struct OnboardingView: View {
         .onAppear {
             systemAudioStatus = SystemAudioPermission.status()
             micStatus = MicRecorder.permissionGranted
-            calendarStatus = CalendarMatcher.isAuthorized
+            calendarStatus = CalendarAuthorization.isAuthorized
             claudeInstalled = ClaudeCLI.isInstalled
             claudeDesktopInstalled = ClaudeDesktop.isInstalled
             Task { await app.refreshNotificationStatus() }
@@ -163,7 +165,7 @@ struct OnboardingView: View {
             detail: "Matches your current meeting for titles and attendees.", ok: calendarStatus
         ) {
             if !calendarStatus {
-                Button("Grant…") { Task { calendarStatus = await CalendarMatcher.requestAccess() } }
+                Button("Grant…") { Task { calendarStatus = await CalendarAuthorization.requestAccess() } }
                     .controlSize(.small)
             }
         }
@@ -216,6 +218,7 @@ struct OnboardingView: View {
 }
 
 private struct OnboardingStepRow<Action: View>: View {
+    @Environment(\.parfaitActionColor) private var actionColor
     let icon: String
     let title: String
     let required: Bool
@@ -228,7 +231,7 @@ private struct OnboardingStepRow<Action: View>: View {
             StatusDot(ok: ok)
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 6) {
-                    Image(systemName: icon).foregroundStyle(Theme.raspberry).font(.parfait(12))
+                    Image(systemName: icon).foregroundStyle(actionColor).font(.parfait(12))
                     Text(title).font(.parfait(13, .semibold))
                     if !required { Chip(text: "Optional") }
                 }

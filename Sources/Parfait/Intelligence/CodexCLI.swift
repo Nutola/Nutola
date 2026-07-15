@@ -30,6 +30,8 @@ struct CodexCLI {
 
     private static let cacheLock = NSLock()
     nonisolated(unsafe) private static var cachedResolution: URL??
+    private static let processLock = NSLock()
+    nonisolated(unsafe) private static var runningProcess: Process?
 
     private static func fastProbe() -> URL? {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
@@ -157,6 +159,13 @@ struct CodexCLI {
         NSWorkspace.shared.open(URL(string: "https://chatgpt.com/codex")!)
     }
 
+    static func cancelRunning() {
+        processLock.lock()
+        defer { processLock.unlock() }
+        runningProcess?.terminate()
+        runningProcess = nil
+    }
+
     /// Non-interactive run via `codex exec`. Runs through a login shell so nvm/npm
     /// wrappers get `node` on PATH — a bare Process() launch fails in GUI apps.
     static func run(
@@ -176,36 +185,54 @@ struct CodexCLI {
             fullPrompt = "\(systemPrompt)\n\n\(prompt)"
         }
 
+        // Bypass approvals so MCP connector calls (e.g. $parfait) aren't auto-cancelled
+        // in non-interactive exec — there is no UI to approve tool use from the Parfait app.
         let cmd = """
-        cd \(shellQuote(workDir.path)) && codex exec -s read-only --ephemeral --skip-git-repo-check --output-last-message \(shellQuote(outFile.path)) \(shellQuote(fullPrompt))
+        cd \(shellQuote(workDir.path)) && codex exec --dangerously-bypass-approvals-and-sandbox -s read-only --ephemeral --skip-git-repo-check --output-last-message \(shellQuote(outFile.path)) \(shellQuote(fullPrompt))
         """
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/zsh")
         process.arguments = ["-lc", cmd]
 
-        let stdinPipe = Pipe()
         let stderrPipe = Pipe()
-        process.standardInput = stdinPipe
+        if let stdin {
+            let stdinPipe = Pipe()
+            process.standardInput = stdinPipe
+            let stdinData = Data(stdin.utf8)
+            DispatchQueue.global(qos: .utility).async {
+                let writer = stdinPipe.fileHandleForWriting
+                try? writer.write(contentsOf: stdinData)
+                try? writer.close()
+            }
+        } else {
+            process.standardInput = FileHandle.nullDevice
+        }
         process.standardOutput = FileHandle.nullDevice
         process.standardError = stderrPipe
 
         async let stderrData = readToEnd(stderrPipe.fileHandleForReading)
 
-        let stdinData = stdin.map { Data($0.utf8) }
         let status: Int32 = try await withCheckedThrowingContinuation { continuation in
-            process.terminationHandler = { continuation.resume(returning: $0.terminationStatus) }
+            processLock.lock()
+            runningProcess = process
+            processLock.unlock()
+
+            process.terminationHandler = { proc in
+                processLock.lock()
+                if runningProcess === proc { runningProcess = nil }
+                processLock.unlock()
+                continuation.resume(returning: proc.terminationStatus)
+            }
             do {
                 try process.run()
             } catch {
+                processLock.lock()
+                if runningProcess === process { runningProcess = nil }
+                processLock.unlock()
                 try? stderrPipe.fileHandleForWriting.close()
                 continuation.resume(throwing: CodexCLIError.failed(status: -1, stderr: error.localizedDescription))
                 return
-            }
-            DispatchQueue.global(qos: .utility).async {
-                let writer = stdinPipe.fileHandleForWriting
-                if let stdinData { try? writer.write(contentsOf: stdinData) }
-                try? writer.close()
             }
         }
 

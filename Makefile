@@ -23,7 +23,7 @@ else
 RUNTIME_ARGS :=
 endif
 
-.PHONY: build test app run install relaunch icon og clean
+.PHONY: build test app run install relaunch app-icon nav-icon og clean
 
 build:
 	swift build -c release
@@ -63,20 +63,26 @@ relaunch:
 	$(MAKE) install
 	open "/Applications/$(APP_NAME).app"
 
-# Regenerate every icon artifact the app actually ships from the drawing code:
-# the .icns bundled by `make app` and the @1x/@2x menu-bar template glyphs
-# loaded via Bundle.module. Keeps the README hero (AppIcon-1024.png) fresh too.
-icon:
-	swift scripts/MakeIcon.swift Resources
+# Regenerate the nav-bar template glyphs loaded via Bundle.module.
+nav-icon:
+	swift scripts/MakeIcon.swift Resources menu
+	cp Resources/NavIcon.png Resources/NavIcon@2x.png Sources/Parfait/Resources/
+	rm -f Resources/NavIcon.png Resources/NavIcon@2x.png Resources/NavIcon-preview.png
+
+# Regenerate the app icon from Resources/AppIcon.svg: .icns, 1024 master,
+# site icon/favicon, and og-image.png.
+app-icon:
+	swift scripts/MakeIcon.swift Resources site app
 	iconutil -c icns Resources/AppIcon.iconset -o Resources/AppIcon.icns
-	cp Resources/MenuBarIcon.png Resources/MenuBarIcon@2x.png Sources/Parfait/Resources/
-	rm -rf Resources/AppIcon.iconset Resources/MenuBarIcon.png Resources/MenuBarIcon@2x.png Resources/MenuBarIcon-preview.png
+	rm -rf Resources/AppIcon.iconset
+	$(MAKE) og
 
 # Regenerate the parfait.to Open Graph preview image (site/og-image.png)
 # from the drawing code, reusing the shipped 1024px app icon.
 og:
 	mkdir -p site
-	swift scripts/MakeOGImage.swift Resources/AppIcon-1024.png site
+	swiftc -O -framework AppKit -framework CoreText -framework CoreGraphics -framework Foundation -framework ImageIO -framework UniformTypeIdentifiers scripts/MakeOGImage.swift -o .build/MakeOGImage
+	.build/MakeOGImage Resources/AppIcon-1024.png site
 
 clean:
 	rm -rf .build "$(DIST)"

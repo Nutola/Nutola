@@ -1,17 +1,24 @@
+import AppKit
 import SwiftUI
 
 struct MeetingLauncherView: View {
     let meeting: Meeting
 
+    private var suggestions: [String] {
+        MeetingAISuggestions.forMeeting(meeting)
+    }
+
     var body: some View {
         AILauncherView(
-            title: "Ask about this meeting",
-            subtitle: "Ask about this meeting through the parfait connector.",
-            suggestions: [],
+            headline: "Ask about this meeting",
+            subtitle: "Summarize, pull action items, or draft a follow-up.",
+            suggestions: suggestions,
+            contextMeeting: meeting,
             promptBuilder: { question in
                 switch AppSettings.preferredAIProvider {
                 case .apple:
-                    ""
+                    ClaudeDesktopPrompt.meeting(
+                        id: meeting.id, title: meeting.title, question: question)
                 case .claude:
                     ClaudeDesktopPrompt.meeting(
                         id: meeting.id, title: meeting.title, question: question)
@@ -25,17 +32,38 @@ struct MeetingLauncherView: View {
 }
 
 struct LibraryLauncherView: View {
+    @EnvironmentObject private var app: AppState
+
+    private var recentMeetings: [Meeting] {
+        app.store.meetings
+            .filter { $0.state == .ready }
+            .sorted { $0.createdAt > $1.createdAt }
+            .prefix(3)
+            .map { $0 }
+    }
+
     var body: some View {
         AILauncherView(
-            title: "Ask across every meeting",
-            subtitle: "Ask anything across your whole meeting library, through the parfait connector.",
-            suggestions: [],
+            headline: "Hi \(UserGreeting.firstName), ask anything",
+            subtitle: "Search across your whole meeting library through the parfait connector.",
+            suggestions: MeetingAISuggestions.library,
+            recentMeetings: recentMeetings,
             promptBuilder: { question in
                 switch AppSettings.preferredAIProvider {
-                case .apple:
-                    ""
-                case .claude: ClaudeDesktopPrompt.library(question: question)
-                case .codex: CodexPrompt.library(question: question)
+                case .apple, .claude:
+                    ClaudeDesktopPrompt.library(question: question)
+                case .codex:
+                    CodexPrompt.library(question: question)
+                }
+            },
+            meetingPromptBuilder: { meeting, question in
+                switch AppSettings.preferredAIProvider {
+                case .apple, .claude:
+                    ClaudeDesktopPrompt.meeting(
+                        id: meeting.id, title: meeting.title, question: question)
+                case .codex:
+                    CodexPrompt.meeting(
+                        id: meeting.id, title: meeting.title, question: question)
                 }
             }
         )
@@ -43,89 +71,404 @@ struct LibraryLauncherView: View {
     }
 }
 
-/// Shared launcher: compose field + Ask AI button for the user's chosen assistant.
+/// Shared launcher: hero compose field, recents, and recipe chips for the user's assistant.
 struct AILauncherView: View {
-    let title: String
-    let subtitle: String
+    let headline: String
+    let subtitle: String?
     let suggestions: [String]
+    var recentMeetings: [Meeting] = []
+    var contextMeeting: Meeting?
     let promptBuilder: (String) -> String
+    var meetingPromptBuilder: ((Meeting, String) -> String)?
 
+    @EnvironmentObject private var app: AppState
+    @Environment(\.openSettings) private var openSettings
     @AppStorage(SettingsKey.preferredAIProvider) private var preferredAIProvider: AIProvider = .apple
+    @AppStorage(SettingsKey.askDeliveryMode) private var askDeliveryMode: AskDeliveryMode = .cli
+    @AppStorage(SettingsKey.askMaxTurns) private var askMaxTurns = 5
     @State private var input = ""
-    @State private var available = AIAsk.isAvailable
+    @State private var available = false
+    @State private var deliveryModeAvailability: [AskDeliveryMode: Bool] = [:]
     @State private var launchFailed = false
+    @State private var isAnswering = false
+    @State private var messages: [AskChatMessage] = []
+    @State private var loadingMessageID: UUID?
+    @State private var answerTask: Task<Void, Never>?
+    @FocusState private var composeFocused: Bool
     @Environment(\.colorScheme) private var scheme
+    @Environment(\.parfaitActionColor) private var actionColor
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            VStack(alignment: .leading, spacing: 6) {
-                Text(title).font(.parfait(17, .semibold))
-                Text(subtitle).font(.parfait(12)).foregroundStyle(.secondary)
-            }
+        ScrollView {
+            VStack(alignment: .leading, spacing: 28) {
+                header
 
-            if !suggestions.isEmpty {
-                FlowLayout(spacing: 8) {
-                    ForEach(suggestions, id: \.self) { suggestion in
-                        Button { launch(suggestion) } label: {
-                            SuggestionChip(text: suggestion)
+                if !messages.isEmpty {
+                    chatSection
+                }
+
+                composeHero
+
+                if showsLongTranscriptHint {
+                    longTranscriptHint
+                }
+
+                if !recentMeetings.isEmpty, meetingPromptBuilder != nil {
+                    recentsSection
+                }
+
+                if !suggestions.isEmpty {
+                    recipesSection
+                }
+
+                footerNotices
+            }
+            .padding(.horizontal, 32)
+            .padding(.vertical, 44)
+            .contentColumn()
+        }
+        .background(Theme.surface(scheme))
+        .onAppear { refreshAvailability() }
+        .onChange(of: preferredAIProvider) {
+            refreshAvailability()
+            if isAnswering { stopAnswering() }
+        }
+        .onChange(of: askDeliveryMode) {
+            refreshAvailability()
+            if isAnswering { stopAnswering() }
+        }
+    }
+
+    private func refreshAvailability() {
+        let provider = preferredAIProvider
+        let mode = askDeliveryMode
+        Task.detached {
+            var byMode: [AskDeliveryMode: Bool] = [:]
+            for deliveryMode in AskDeliveryMode.allCases {
+                byMode[deliveryMode] = AIAsk.isAvailable(for: deliveryMode, provider: provider)
+            }
+            let availability = byMode
+            await MainActor.run {
+                deliveryModeAvailability = availability
+                available = availability[mode] ?? false
+            }
+        }
+    }
+
+    private var contextTranscriptChars: Int {
+        guard let contextMeeting else { return 0 }
+        return app.store.transcript(for: contextMeeting.id)
+            .reduce(0) { $0 + $1.text.count }
+    }
+
+    private var showsLongTranscriptHint: Bool {
+        askDeliveryMode == .cli
+            && contextTranscriptChars > 20_000
+            && askMaxTurns < 8
+    }
+
+    private var header: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(headline)
+                .font(.parfait(26, .bold))
+                .foregroundStyle(Theme.heading(scheme))
+                .lineLimit(2)
+            if let subtitle {
+                Text(subtitle)
+                    .font(.parfait(13))
+                    .foregroundStyle(Theme.secondary(scheme))
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var composeHero: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            TextField("Ask anything…", text: $input, axis: .vertical)
+                .textFieldStyle(.plain)
+                .font(.parfait(15))
+                .lineLimit(3...8)
+                .focused($composeFocused)
+                .disabled(!available || isAnswering)
+                .onSubmit(launchTyped)
+                .padding(.horizontal, 18)
+                .padding(.top, 18)
+                .padding(.bottom, 10)
+
+            HStack(alignment: .center, spacing: 10) {
+                providerBadge
+                Spacer(minLength: 8)
+                submitButton
+            }
+            .padding(.horizontal, 14)
+            .padding(.bottom, 14)
+        }
+        .background(Theme.card(scheme), in: RoundedRectangle(cornerRadius: Theme.cornerRadius))
+        .overlay {
+            RoundedRectangle(cornerRadius: Theme.cornerRadius)
+                .strokeBorder(composeBorder, lineWidth: composeFocused ? 1.5 : 1)
+        }
+        .shadow(
+            color: actionColor.opacity(composeFocused && available ? 0.18 : 0),
+            radius: composeFocused ? 16 : 0,
+            y: composeFocused ? 4 : 0
+        )
+        .animation(.easeOut(duration: 0.18), value: composeFocused)
+    }
+
+    private var composeBorder: some ShapeStyle {
+        if composeFocused, available {
+            return AnyShapeStyle(
+                LinearGradient(
+                    colors: [actionColor.opacity(0.65), Theme.blueberry(scheme).opacity(0.45)],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+            )
+        }
+        return AnyShapeStyle(Color.primary.opacity(scheme == .dark ? 0.14 : 0.1))
+    }
+
+    @ViewBuilder
+    private var providerBadge: some View {
+        Menu {
+            Section("Assistant") {
+                ForEach(AIProvider.askChoices) { provider in
+                    Button {
+                        preferredAIProvider = provider
+                    } label: {
+                        if preferredAIProvider == provider {
+                            Label(provider.displayName, systemImage: "checkmark")
+                        } else {
+                            Text(provider.displayName)
                         }
-                        .buttonStyle(.plain)
-                        .disabled(!available)
-                        .opacity(available ? 1 : 0.4)
                     }
                 }
             }
-
-            composeBar
-
-            if available {
-                Text("Tip: once the parfait connector is set up, you can open \(preferredAIProvider.displayName) and ask about your meetings anytime — you don't have to start here. Use $parfait to attach the connector.")
-                    .font(.parfait(11))
-                    .foregroundStyle(.secondary)
-            } else if preferredAIProvider == .apple {
-                Text("Apple Intelligence handles summaries on-device. Pick Claude or Codex in Settings → Intelligence to ask about your meetings in chat.")
-                    .font(.parfait(11))
-                    .foregroundStyle(.secondary)
+            Section("How to answer") {
+                ForEach(AskDeliveryMode.allCases) { mode in
+                    Button {
+                        askDeliveryMode = mode
+                    } label: {
+                        if askDeliveryMode == mode {
+                            Label(mode.displayName, systemImage: "checkmark")
+                        } else {
+                            Text(mode.displayName)
+                        }
+                    }
+                    .disabled(!(deliveryModeAvailability[mode] ?? false))
+                }
             }
+            .disabled(preferredAIProvider == .apple)
 
-            if launchFailed {
-                Label("Couldn't open \(preferredAIProvider.displayName).", systemImage: "exclamationmark.triangle")
-                    .font(.parfait(11))
-                    .foregroundStyle(.orange)
+            if askDeliveryMode == .cli, preferredAIProvider != .apple {
+                Section("Context") {
+                    Button("More tool rounds (\(askMaxTurns) → \(min(askMaxTurns + 2, 15)))") {
+                        askMaxTurns = min(askMaxTurns + 2, 15)
+                    }
+                    .disabled(askMaxTurns >= 15)
+                    Button("Fewer tool rounds (\(askMaxTurns) → \(max(askMaxTurns - 2, 3)))") {
+                        askMaxTurns = max(askMaxTurns - 2, 3)
+                    }
+                    .disabled(askMaxTurns <= 3)
+                    Button("Open Intelligence settings…") { openSettings() }
+                }
             }
-
-            if !available {
-                unavailableNotice
+        } label: {
+            HStack(spacing: 5) {
+                Image(systemName: badgeIcon)
+                    .font(.system(size: 10, weight: .semibold))
+                Text(badgeLabel)
+                    .font(.parfait(11, .medium))
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 8, weight: .bold))
+                    .opacity(0.55)
             }
-
-            Spacer()
+            .foregroundStyle(Theme.secondary(scheme))
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background(Color.primary.opacity(0.06), in: Capsule())
         }
-        .padding(20)
-        .frame(maxWidth: 640, alignment: .leading)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(Theme.surface(scheme))
-        .id(preferredAIProvider)
-        .onAppear { available = AIAsk.isAvailable }
-        .onChange(of: preferredAIProvider) { available = AIAsk.isAvailable }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help("Change assistant or how questions are answered")
     }
 
-    private var composeBar: some View {
-        HStack(spacing: 10) {
-            TextField("Ask anything…", text: $input, axis: .vertical)
-                .textFieldStyle(.plain)
-                .font(.parfait(13))
-                .lineLimit(1...4)
-                .disabled(!available)
-                .onSubmit(launchTyped)
-                .padding(12)
-                .background(Theme.card(scheme), in: RoundedRectangle(cornerRadius: 10))
-            Button(action: launchTyped) {
-                Label("Ask AI", systemImage: "arrow.up.forward.app")
-                    .font(.parfait(13, .semibold))
+    private var badgeIcon: String {
+        switch preferredAIProvider {
+        case .apple: "apple.intelligence"
+        case .codex where askDeliveryMode == .cli: "terminal"
+        case .claude where askDeliveryMode == .cli: "terminal"
+        default: "sparkles"
+        }
+    }
+
+    private var badgeLabel: String {
+        switch preferredAIProvider {
+        case .apple:
+            return "Apple Intelligence"
+        case .claude, .codex:
+            if askDeliveryMode == .cli {
+                return "\(preferredAIProvider.displayName) · CLI"
             }
-            .buttonStyle(.borderedProminent)
-            .tint(Theme.raspberry)
-            .disabled(!available || input.trimmingCharacters(in: .whitespaces).isEmpty)
+            return preferredAIProvider.displayName
+        }
+    }
+
+    private var submitButton: some View {
+        Group {
+            if isAnswering {
+                Button(action: stopAnswering) {
+                    Image(systemName: "stop.fill")
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundStyle(.white)
+                        .frame(width: 34, height: 34)
+                        .background(Circle().fill(actionColor))
+                }
+                .buttonStyle(.plain)
+                .help("Stop")
+            } else {
+                let canSubmit = available && !input.trimmingCharacters(in: .whitespaces).isEmpty
+                Button(action: launchTyped) {
+                    Image(systemName: "arrow.up")
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundStyle(.white)
+                        .frame(width: 34, height: 34)
+                        .background(
+                            Circle().fill(canSubmit ? actionColor : Color.secondary.opacity(0.25))
+                        )
+                }
+                .buttonStyle(.plain)
+                .disabled(!canSubmit)
+                .help(submitHelp)
+            }
+        }
+    }
+
+    private var submitHelp: String {
+        switch preferredAIProvider {
+        case .apple: "Answer with Apple Intelligence"
+        case .claude, .codex:
+            switch askDeliveryMode {
+            case .cli: "Answer with \(preferredAIProvider.displayName) CLI"
+            case .app: "Open in \(preferredAIProvider.displayName)"
+            }
+        }
+    }
+
+    private var chatSection: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            ForEach(messages) { message in
+                AskChatBubble(message: message)
+            }
+        }
+    }
+
+    private var longTranscriptHint: some View {
+        HStack(spacing: 6) {
+            Text("This meeting has a long transcript — increase context rounds for better answers.")
+                .font(.parfait(11))
+                .foregroundStyle(Theme.tertiary(scheme))
+            Button("Settings") { openSettings() }
+                .font(.parfait(11, .medium))
+                .buttonStyle(.plain)
+                .foregroundStyle(actionColor)
+        }
+    }
+
+    private var recentsSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Recents")
+                .font(.parfait(13, .semibold))
+                .foregroundStyle(Theme.secondary(scheme))
+
+            VStack(spacing: 0) {
+                ForEach(recentMeetings) { meeting in
+                    Button {
+                        launchRecent(meeting)
+                    } label: {
+                        HStack(alignment: .firstTextBaseline, spacing: 12) {
+                            Text(meeting.title)
+                                .font(.parfait(13, .medium))
+                                .foregroundStyle(Theme.heading(scheme))
+                                .lineLimit(1)
+                            Spacer(minLength: 8)
+                            Text(PastRelativeFormatter.ago(meeting.createdAt))
+                                .font(.parfait(11))
+                                .foregroundStyle(Theme.tertiary(scheme))
+                        }
+                        .contentShape(Rectangle())
+                        .padding(.vertical, 10)
+                        .padding(.horizontal, 12)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!available || isAnswering)
+
+                    if meeting.id != recentMeetings.last?.id {
+                        Divider().padding(.leading, 12)
+                    }
+                }
+            }
+            .background(Theme.card(scheme), in: RoundedRectangle(cornerRadius: 12))
+        }
+    }
+
+    private var recipesSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Recipes")
+                .font(.parfait(13, .semibold))
+                .foregroundStyle(Theme.secondary(scheme))
+
+            FlowLayout(spacing: 8) {
+                ForEach(suggestions, id: \.self) { suggestion in
+                    Button { launch(suggestion) } label: {
+                        RecipeChip(text: suggestion)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!available || isAnswering)
+                    .opacity(available && !isAnswering ? 1 : 0.45)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var footerNotices: some View {
+        if launchFailed {
+            Label(failureMessage, systemImage: "exclamationmark.triangle")
+                .font(.parfait(11))
+                .foregroundStyle(.orange)
+        }
+
+        if !available {
+            unavailableNotice
+        } else if preferredAIProvider == .apple {
+            Text("Answers run on-device with your meeting summaries embedded in the prompt.")
+                .font(.parfait(11))
+                .foregroundStyle(Theme.tertiary(scheme))
+        } else if askDeliveryMode == .app {
+            Text(
+                "Tip: once the parfait connector is set up, open \(preferredAIProvider.displayName) anytime — use $parfait to attach the connector."
+            )
+            .font(.parfait(11))
+            .foregroundStyle(Theme.tertiary(scheme))
+        } else {
+            Text(
+                "Answers run through the \(preferredAIProvider.displayName) CLI with the parfait connector. Tap the badge to switch assistants or open in the app instead."
+            )
+            .font(.parfait(11))
+            .foregroundStyle(Theme.tertiary(scheme))
+        }
+    }
+
+    private var failureMessage: String {
+        switch preferredAIProvider {
+        case .apple: "Couldn't get an answer from Apple Intelligence."
+        case .claude, .codex:
+            switch askDeliveryMode {
+            case .app: "Couldn't open \(preferredAIProvider.displayName)."
+            case .cli: "Couldn't get an answer from \(preferredAIProvider.displayName)."
+            }
         }
     }
 
@@ -134,66 +477,340 @@ struct AILauncherView: View {
         switch preferredAIProvider {
         case .apple:
             VStack(alignment: .leading, spacing: 6) {
-                Label("Chat needs Claude or Codex", systemImage: "info.circle")
+                Label("Apple Intelligence unavailable", systemImage: "exclamationmark.triangle")
                     .font(.parfait(12, .semibold))
-                    .foregroundStyle(.secondary)
-                Text("Summaries already use Apple Intelligence on this Mac. Switch assistant in Settings → Intelligence to ask about meetings.")
+                    .foregroundStyle(.orange)
+                Text(AppleSummarizer.unavailableReason ?? "Turn on Apple Intelligence in System Settings, or pick Claude or Codex from the badge.")
                     .font(.parfait(11))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Theme.secondary(scheme))
             }
             .padding(12)
-            .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
+            .background(Color.orange.opacity(0.09), in: RoundedRectangle(cornerRadius: 8))
         case .claude:
-            VStack(alignment: .leading, spacing: 6) {
-                Label("Claude Desktop isn't installed", systemImage: "exclamationmark.triangle")
-                    .font(.parfait(12, .semibold))
-                    .foregroundStyle(.orange)
-                HStack(spacing: 4) {
-                    Link("Get Claude Desktop", destination: URL(string: "https://claude.ai/download")!)
-                    Text("— then add the parfait connector in Settings.")
-                        .foregroundStyle(.secondary)
-                }
-                .font(.parfait(11))
-            }
-            .padding(12)
-            .background(Color.orange.opacity(0.09), in: RoundedRectangle(cornerRadius: 8))
+            cliUnavailableNotice(
+                title: askDeliveryMode == .cli
+                    ? (ClaudeCLI.isInstalled ? "Claude Code isn't logged in" : "Claude Code isn't installed")
+                    : "Claude Desktop isn't installed",
+                linkTitle: askDeliveryMode == .cli ? "Get Claude Code" : "Get Claude Desktop",
+                linkURL: askDeliveryMode == .cli
+                    ? URL(string: "https://claude.com/claude-code")!
+                    : URL(string: "https://claude.ai/download")!
+            )
         case .codex:
-            VStack(alignment: .leading, spacing: 6) {
-                Label("Codex isn't installed", systemImage: "exclamationmark.triangle")
-                    .font(.parfait(12, .semibold))
-                    .foregroundStyle(.orange)
-                HStack(spacing: 4) {
-                    Link("Get Codex", destination: URL(string: "https://chatgpt.com/codex")!)
-                    Text("— then add the parfait connector in Settings.")
-                        .foregroundStyle(.secondary)
-                }
-                .font(.parfait(11))
-            }
-            .padding(12)
-            .background(Color.orange.opacity(0.09), in: RoundedRectangle(cornerRadius: 8))
+            cliUnavailableNotice(
+                title: askDeliveryMode == .cli
+                    ? (CodexCLI.isInstalled ? "Codex isn't logged in" : "Codex CLI isn't installed")
+                    : "Codex app isn't installed",
+                linkTitle: "Get Codex",
+                linkURL: URL(string: "https://chatgpt.com/codex")!
+            )
         }
     }
 
+    private func cliUnavailableNotice(title: String, linkTitle: String, linkURL: URL) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Label(title, systemImage: "exclamationmark.triangle")
+                .font(.parfait(12, .semibold))
+                .foregroundStyle(.orange)
+            HStack(spacing: 4) {
+                Link(linkTitle, destination: linkURL)
+                Text("— then add the parfait connector in Settings.")
+                    .foregroundStyle(Theme.secondary(scheme))
+            }
+            .font(.parfait(11))
+        }
+        .padding(12)
+        .background(Color.orange.opacity(0.09), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func launchRecent(_ meeting: Meeting) {
+        guard let builder = meetingPromptBuilder else { return }
+        let question = "What were the key takeaways?"
+        submit(
+            displayText: "\(meeting.title) — \(question)",
+            prompt: builder(meeting, question)
+        )
+    }
+
     private func launch(_ question: String) {
-        launchFailed = !AIAsk.open(prompt: promptBuilder(question))
-        if !launchFailed { input = "" }
+        submit(displayText: question, prompt: promptBuilder(question))
+    }
+
+    private func submit(displayText: String, prompt: String) {
+        launchFailed = false
+        messages.append(AskChatMessage(role: .user, text: displayText))
+
+        switch preferredAIProvider == .apple ? AskDeliveryMode.cli : askDeliveryMode {
+        case .app:
+            launchFailed = !AIAsk.open(prompt: prompt)
+            if !launchFailed { input = "" }
+        case .cli:
+            guard available else {
+                launchFailed = true
+                return
+            }
+            beginCLIAnswer(prompt: prompt)
+        }
+    }
+
+    private func beginCLIAnswer(prompt: String) {
+        answerTask?.cancel()
+        AIAsk.cancel()
+
+        let loadingID = UUID()
+        loadingMessageID = loadingID
+        messages.append(AskChatMessage(id: loadingID, role: .assistant, text: "", isLoading: true))
+        isAnswering = true
+
+        answerTask = Task {
+            do {
+                let text = try await AIAsk.answer(prompt: prompt) { delta in
+                    Task { @MainActor in
+                        updateLoadingMessage(text: delta)
+                    }
+                }
+                guard !Task.isCancelled else { return }
+                await MainActor.run {
+                    finishLoadingMessage(text: text)
+                    isAnswering = false
+                    answerTask = nil
+                }
+            } catch is CancellationError {
+                await MainActor.run {
+                    removeLoadingMessage()
+                    isAnswering = false
+                    answerTask = nil
+                }
+            } catch {
+                guard !Task.isCancelled else {
+                    await MainActor.run {
+                        removeLoadingMessage()
+                        isAnswering = false
+                        answerTask = nil
+                    }
+                    return
+                }
+                await MainActor.run {
+                    finishLoadingMessage(text: error.localizedDescription, isError: true)
+                    isAnswering = false
+                    launchFailed = true
+                    answerTask = nil
+                }
+            }
+        }
+    }
+
+    private func stopAnswering() {
+        answerTask?.cancel()
+        AIAsk.cancel()
+        removeLoadingMessage()
+        isAnswering = false
+        answerTask = nil
+    }
+
+    private func updateLoadingMessage(text: String) {
+        guard let loadingMessageID,
+              let index = messages.firstIndex(where: { $0.id == loadingMessageID })
+        else { return }
+        messages[index] = AskChatMessage(
+            id: loadingMessageID,
+            role: .assistant,
+            text: text,
+            isLoading: text.isEmpty
+        )
+    }
+
+    private func finishLoadingMessage(text: String, isError: Bool = false) {
+        guard let loadingMessageID,
+              let index = messages.firstIndex(where: { $0.id == loadingMessageID })
+        else { return }
+        messages[index] = AskChatMessage(
+            id: loadingMessageID,
+            role: .assistant,
+            text: text,
+            isLoading: false,
+            isError: isError
+        )
+        self.loadingMessageID = nil
+    }
+
+    private func removeLoadingMessage() {
+        guard let loadingMessageID else { return }
+        messages.removeAll { $0.id == loadingMessageID }
+        self.loadingMessageID = nil
     }
 
     private func launchTyped() {
         let text = input.trimmingCharacters(in: .whitespaces)
-        guard !text.isEmpty else { return }
+        guard !text.isEmpty, !isAnswering else { return }
+        input = ""
         launch(text)
     }
 }
 
-private struct SuggestionChip: View {
+private struct AskChatBubble: View {
+    let message: AskChatMessage
+
+    @Environment(\.colorScheme) private var scheme
+    @State private var isHovering = false
+    @State private var didCopy = false
+
+    private var canCopy: Bool {
+        !message.isLoading && !message.text.isEmpty
+    }
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 0) {
+            if message.role == .user { Spacer(minLength: 56) }
+
+            bubbleContent
+                .onHover { isHovering = $0 }
+
+            if message.role == .assistant { Spacer(minLength: 56) }
+        }
+    }
+
+    @ViewBuilder
+    private var bubbleContent: some View {
+        ZStack(alignment: .topTrailing) {
+            Group {
+                if message.isLoading {
+                    HStack(spacing: 8) {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text("Asking \(AppSettings.preferredAIProvider.displayName)…")
+                            .font(.parfait(13))
+                            .foregroundStyle(Theme.secondary(scheme))
+                    }
+                } else if message.role == .assistant {
+                    MarkdownText(markdown: message.text, style: .document)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                } else {
+                    Text(message.text)
+                        .font(.parfait(14))
+                        .foregroundStyle(Theme.heading(scheme))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 11)
+            .padding(.top, canCopy && isHovering ? 4 : 0)
+            .background(
+                message.isError
+                    ? Color.orange.opacity(scheme == .dark ? 0.14 : 0.1)
+                    : Theme.bubble(scheme, isSelf: message.role == .user),
+                in: RoundedRectangle(cornerRadius: 14)
+            )
+
+            if canCopy, isHovering {
+                copyButton
+                    .padding(8)
+                    .transition(.opacity)
+            }
+        }
+        .animation(.easeOut(duration: 0.12), value: isHovering)
+    }
+
+    private var copyButton: some View {
+        Button(action: copyText) {
+            Image(systemName: didCopy ? "checkmark" : "doc.on.doc")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(Theme.secondary(scheme))
+                .frame(width: 24, height: 24)
+                .background(Color.primary.opacity(scheme == .dark ? 0.22 : 0.08), in: Circle())
+        }
+        .buttonStyle(.plain)
+        .help(didCopy ? "Copied" : "Copy")
+    }
+
+    private func copyText() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(message.text, forType: .string)
+        didCopy = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { didCopy = false }
+    }
+}
+
+private struct AskChatMessage: Identifiable {
+    enum Role { case user, assistant }
+
+    let id: UUID
+    let role: Role
+    var text: String
+    var isLoading: Bool
+    var isError: Bool
+
+    init(
+        id: UUID = UUID(),
+        role: Role,
+        text: String,
+        isLoading: Bool = false,
+        isError: Bool = false
+    ) {
+        self.id = id
+        self.role = role
+        self.text = text
+        self.isLoading = isLoading
+        self.isError = isError
+    }
+}
+
+private struct RecipeChip: View {
+    @Environment(\.colorScheme) private var scheme
     let text: String
+
     var body: some View {
         Text(text)
             .font(.parfait(12, .medium))
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .background(Theme.honey.opacity(0.16), in: Capsule())
-            .foregroundStyle(.primary)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 7)
+            .background(Theme.card(scheme), in: Capsule())
+            .overlay {
+                Capsule().strokeBorder(Color.primary.opacity(0.08), lineWidth: 1)
+            }
+            .foregroundStyle(Theme.heading(scheme))
     }
+}
+
+private enum UserGreeting {
+    static var firstName: String {
+        let full = NSFullUserName()
+        guard !full.isEmpty else { return "there" }
+        return full.split(separator: " ").first.map(String.init) ?? full
+    }
+}
+
+private enum PastRelativeFormatter {
+    static func ago(_ date: Date, now: Date = .now) -> String {
+        let interval = max(0, now.timeIntervalSince(date))
+        let minutes = Int(interval / 60)
+        if minutes < 60 { return "\(max(minutes, 1))m" }
+        let hours = minutes / 60
+        if hours < 24 { return "\(hours)h" }
+        let days = hours / 24
+        if days < 7 { return "\(days)d" }
+        let weeks = days / 7
+        if weeks < 5 { return "\(weeks)w" }
+        let months = days / 30
+        if months < 12 { return "\(months)mo" }
+        return "\(days / 365)y"
+    }
+}
+
+enum MeetingAISuggestions {
+    static func forMeeting(_ meeting: Meeting) -> [String] {
+        var items = ["Summarize this meeting", "List action items", "Write follow-up email"]
+        if let speaker = meeting.speakers.first(where: { !$0.isMe }) {
+            items.append("What did \(speaker.name) say?")
+        }
+        return items
+    }
+
+    static let library = [
+        "Summarize my meetings this week",
+        "What action items do I have?",
+        "What decisions came out of recent calls?",
+        "List open questions from recent meetings",
+        "Who have I met with most this month?",
+    ]
 }

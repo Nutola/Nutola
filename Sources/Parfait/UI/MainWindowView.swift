@@ -1,15 +1,18 @@
 import SwiftUI
 
 enum SidebarItem: Hashable {
+    case home
+    case meetings
     case library
-    case meeting(UUID)
+    case folder(UUID)
 }
 
 struct MainWindowView: View {
     @EnvironmentObject private var app: AppState
     @Environment(\.colorScheme) private var scheme
     @State private var selection: SidebarItem?
-    @State private var query = ""
+    @State private var presentedMeetingID: UUID?
+    @State private var showNewFolder = false
 
     var body: some View {
         NavigationSplitView {
@@ -21,52 +24,52 @@ struct MainWindowView: View {
         .background(Theme.surface(scheme))
         .onAppear { adoptPendingSelection() }
         .onChange(of: app.openMeetingID) { adoptPendingSelection() }
+        .onChange(of: selection) { _, _ in presentedMeetingID = nil }
+        .sheet(isPresented: $showNewFolder) {
+            FolderEditorSheet(title: "New folder") { name, description, kind, value, colorHex in
+                let folder = app.folders.createFolder(
+                    name: name,
+                    description: description,
+                    iconKind: kind,
+                    iconValue: value,
+                    iconColorHex: colorHex)
+                selection = .folder(folder.id)
+            }
+        }
     }
 
     private func adoptPendingSelection() {
         if let id = app.openMeetingID {
-            selection = .meeting(id)
+            presentedMeetingID = id
             app.openMeetingID = nil
-        } else if selection == nil, let first = app.store.meetings.first {
-            selection = .meeting(first.id)
+        } else if selection == nil {
+            selection = .home
         }
     }
 
-    private var filtered: [Meeting] {
-        let q = query.trimmingCharacters(in: .whitespaces).lowercased()
-        guard !q.isEmpty else { return app.store.meetings }
-        return app.store.meetings.filter { m in
-            m.title.lowercased().contains(q)
-                || m.attendees.contains { $0.lowercased().contains(q) }
-                || (m.sourceApp?.lowercased().contains(q) ?? false)
+    private func dismissMeeting() {
+        presentedMeetingID = nil
+    }
+
+    private var meetingBackTitle: String {
+        switch selection {
+        case .home: "Coming up"
+        case .meetings: "Meetings"
+        case .library: "Ask your meetings"
+        case .folder(let id):
+            app.folders.folder(id: id)?.name ?? "Folder"
+        case nil: "Back"
         }
     }
 
     private var sidebar: some View {
         List(selection: $selection) {
-            Section {
-                Label("Ask your meetings", systemImage: "bubble.left.and.text.bubble.right")
-                    .font(.parfait(13, .medium))
-                    .tag(SidebarItem.library)
-            }
-            Section("Meetings") {
-                ForEach(filtered) { meeting in
-                    MeetingRow(meeting: meeting, stage: app.processingStage[meeting.id])
-                        .tag(SidebarItem.meeting(meeting.id))
-                        .contextMenu {
-                            Button("Show in Finder") {
-                                NSWorkspace.shared.activateFileViewerSelecting(
-                                    [app.store.archive.folder(for: meeting.id)])
-                            }
-                            Button("Delete…", role: .destructive) {
-                                app.store.delete(id: meeting.id)
-                                if selection == .meeting(meeting.id) { selection = nil }
-                            }
-                        }
-                }
-            }
+            navSection
+            foldersSection
         }
-        .searchable(text: $query, placement: .sidebar, prompt: "Filter meetings")
+        .listStyle(.sidebar)
+        .scrollContentBackground(.hidden)
+        .background(Theme.surface(scheme))
         .safeAreaInset(edge: .bottom) {
             if let session = app.session {
                 SidebarRecordingStrip(session: session)
@@ -74,57 +77,163 @@ struct MainWindowView: View {
         }
     }
 
+    private var navSection: some View {
+        Section {
+            Label("Coming up", systemImage: "calendar")
+                .font(.parfait(13, .medium))
+                .tag(SidebarItem.home)
+            Label("Meetings", systemImage: "list.bullet.rectangle")
+                .font(.parfait(13, .medium))
+                .tag(SidebarItem.meetings)
+            Label("Ask your meetings", systemImage: "bubble.left.and.text.bubble.right")
+                .font(.parfait(13, .medium))
+                .tag(SidebarItem.library)
+        }
+    }
+
+    private var foldersSection: some View {
+        Section("Folders") {
+            ForEach(app.folders.folders) { folder in
+                FolderSidebarRow(folder: folder)
+                    .tag(SidebarItem.folder(folder.id))
+            }
+            Button {
+                showNewFolder = true
+            } label: {
+                Label("New folder", systemImage: "plus")
+                    .font(.parfait(13))
+                    .foregroundStyle(Theme.secondary(scheme))
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
     @ViewBuilder
     private var detail: some View {
-        switch selection {
-        case .library:
-            LibraryLauncherView()
-        case .meeting(let id):
-            if let meeting = app.store.meetings.first(where: { $0.id == id }) {
-                MeetingDetailView(meeting: meeting)
-                    .id(id)
-            } else {
+        Group {
+            if let id = presentedMeetingID,
+               let meeting = app.store.meetings.first(where: { $0.id == id }) {
+                MeetingDetailView(
+                    meeting: meeting,
+                    backTitle: meetingBackTitle,
+                    onBack: dismissMeeting)
+            } else if presentedMeetingID != nil {
                 EmptyStateView(
                     title: "Meeting not found",
                     message: "It may have been deleted.")
+                .onAppear { dismissMeeting() }
+            } else {
+                switch selection {
+                case .home:
+                    ComingUpView()
+                case .meetings:
+                    MeetingsListView()
+                case .library:
+                    LibraryLauncherView()
+                case .folder(let id):
+                    if let folder = app.folders.folder(id: id) {
+                        FolderDetailView(folder: folder)
+                    } else {
+                        EmptyStateView(
+                            title: "Folder not found",
+                            message: "It may have been deleted.")
+                    }
+                case nil:
+                    ComingUpView()
+                }
             }
-        case nil:
-            EmptyStateView(
-                title: "No meeting selected",
-                message: "Record your first meeting from the parfait glass in the menu bar — it all stays on this Mac.")
         }
+        .id(detailIdentity)
+    }
+
+    private var detailIdentity: String {
+        if let id = presentedMeetingID {
+            return "meeting-\(id.uuidString)"
+        }
+        return "section-\(String(describing: selection))"
     }
 }
 
-struct MeetingRow: View {
-    let meeting: Meeting
-    let stage: String?
+private struct FolderSidebarRow: View {
+    @EnvironmentObject private var app: AppState
+    @Environment(\.colorScheme) private var scheme
+    let folder: MeetingFolder
+    @State private var isDropTargeted = false
+    @State private var showDeleteConfirm = false
+    @State private var showIconEditor = false
+    @State private var renameName = ""
+    @State private var showRename = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Text(meeting.title)
-                .font(.parfait(13, .medium))
-                .lineLimit(1)
-            HStack(spacing: 6) {
-                Text(meeting.createdAt.formatted(date: .abbreviated, time: .shortened))
-                    .font(.parfait(11))
-                    .foregroundStyle(.secondary)
-                if meeting.duration > 0 {
-                    Text(TemplateRenderer.duration(meeting.duration))
-                        .font(.parfait(11))
-                        .foregroundStyle(.tertiary)
-                }
-                Spacer()
-                StateBadge(meeting: meeting, stage: stage)
+        FolderLabel(folder: folder, iconSize: 20)
+            .font(.parfait(13, .medium))
+            .foregroundStyle(Theme.heading(scheme))
+            .padding(.vertical, 2)
+            .background(isDropTargeted ? Theme.mint(scheme).opacity(0.2) : Color.clear)
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+            .dropDestination(for: MeetingDragItem.self) { items, _ in
+                guard let item = items.first else { return false }
+                let meeting = app.store.meeting(id: item.meetingID)
+                if meeting?.folderID == folder.id { return false }
+                app.folders.assign(meetingID: item.meetingID, to: folder.id, meetingStore: app.store)
+                return true
+            } isTargeted: { targeted in
+                isDropTargeted = targeted
             }
-        }
-        .padding(.vertical, 2)
+            .contextMenu {
+                Button("Edit folder…") { showIconEditor = true }
+                Button("Rename") {
+                    renameName = folder.name
+                    showRename = true
+                }
+                Button("Delete…", role: .destructive) { showDeleteConfirm = true }
+                Divider()
+                Button("Show in Finder") {
+                    NSWorkspace.shared.open(app.folders.archive.foldersDir)
+                }
+            }
+            .alert("Rename folder", isPresented: $showRename) {
+                TextField("Name", text: $renameName)
+                Button("Cancel", role: .cancel) {}
+                Button("Save") {
+                    var f = folder
+                    let trimmed = renameName.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !trimmed.isEmpty else { return }
+                    f.name = trimmed
+                    app.folders.updateFolder(f)
+                }
+            }
+            .confirmationDialog("Delete “\(folder.name)”?", isPresented: $showDeleteConfirm) {
+                Button("Delete folder", role: .destructive) {
+                    app.folders.deleteFolder(id: folder.id, meetingStore: app.store)
+                }
+            } message: {
+                Text("Meetings in this folder will be unfiled.")
+            }
+            .sheet(isPresented: $showIconEditor) {
+                FolderEditorSheet(
+                    initialName: folder.name,
+                    initialDescription: folder.description ?? "",
+                    initialKind: folder.iconKind,
+                    initialValue: folder.iconValue,
+                    initialColorHex: folder.iconColorHex
+                ) { name, description, kind, value, colorHex in
+                    var updated = folder
+                    updated.name = name
+                    updated.description = description
+                    updated.iconKind = kind
+                    updated.iconValue = value
+                    updated.iconColorHex = colorHex
+                    app.folders.updateFolder(updated)
+                }
+            }
     }
 }
 
 private struct SidebarRecordingStrip: View {
     @ObservedObject var session: RecordingSession
     @EnvironmentObject private var app: AppState
+    @Environment(\.parfaitActionColor) private var actionColor
 
     var body: some View {
         HStack(spacing: 8) {
@@ -134,7 +243,7 @@ private struct SidebarRecordingStrip: View {
             Spacer()
             Button("Stop") { Task { await app.stopRecording() } }
                 .buttonStyle(.borderedProminent)
-                .tint(Theme.raspberry)
+                .tint(actionColor)
                 .controlSize(.small)
         }
         .padding(10)

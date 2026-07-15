@@ -63,6 +63,14 @@ final class StoreTests: XCTestCase {
         XCTAssertEqual(archive.summary(for: m.id), "## TL;DR\nShipped it.")
     }
 
+    func testSideNotesRoundTrip() throws {
+        let m = makeMeeting()
+        try archive.save(m)
+        try archive.saveSideNotes("- Action: follow up with design\n- Blocker: API latency", for: m.id)
+        XCTAssertEqual(archive.sideNotes(for: m.id), "- Action: follow up with design\n- Blocker: API latency")
+        XCTAssertEqual(archive.summary(for: m.id), "")
+    }
+
     func testDelete() throws {
         let m = makeMeeting()
         try archive.save(m)

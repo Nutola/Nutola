@@ -34,6 +34,8 @@ enum ProcessingPipeline {
         onSummary: @escaping @Sendable (SummaryUpdate) -> Void = { _ in }
     ) async -> Outcome {
         let id = meeting.id
+        let priorSegments = archive.transcript(for: id)
+        let appendOffset = Self.appendOffset(meeting: meeting, prior: priorSegments)
         let micURL = archive.micURL(for: id)
         let systemURL = archive.systemURL(for: id)
         let hasMic = FileManager.default.fileExists(atPath: micURL.path)
@@ -46,11 +48,20 @@ enum ProcessingPipeline {
         //    still being built. A failed draft just falls through to the batch pass.
         let liveSegments = archive.liveTranscript(for: id)
         let liveText = TranscriptFormatter.plainText(liveSegments, speakers: LiveTranscriber.speakers)
+        let priorText = priorSegments.isEmpty
+            ? ""
+            : TranscriptFormatter.plainText(priorSegments, speakers: meeting.speakers)
+        let draftInput = [priorText, liveText]
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n\n")
         var draft: (text: String, provider: String)?
-        if !liveText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        let userNotes = archive.sideNotes(for: id)
+        if !draftInput.isEmpty {
             onSummary(.streaming(""))
             switch await summarize(
-                meeting: meeting, transcript: liveText, onDelta: { onSummary(.streaming($0)) }) {
+                meeting: meeting, transcript: draftInput, userNotes: userNotes,
+                onDelta: { onSummary(.streaming($0)) }) {
             case .success(let text, let provider):
                 // Only treat the draft as real if it actually persisted. If the write
                 // fails, leaving `draft` nil lets the improvement pass save normally
@@ -90,18 +101,18 @@ enum ProcessingPipeline {
         }
 
         guard micOut != nil || systemOut != nil else {
-            // No accurate transcript. If a draft (and the live transcript AppState
-            // already surfaced) exist, keep them rather than failing the meeting —
-            // and still name the meeting from the draft.
+            // No accurate transcript from this session. If a draft (and any live
+            // transcript AppState already surfaced) exist, keep them rather than
+            // failing the meeting — and still name the meeting from the draft.
             if let draft, meeting.calendarEventTitle == nil {
                 onProgress("Naming the meeting…")
                 outcome.generatedTitle = await generateTitle(summary: draft.text, provider: draft.provider)
             }
             onSummary(.done)
-            outcome.state = draft == nil ? .failed : .ready
+            outcome.state = (draft == nil && priorSegments.isEmpty) ? .failed : .ready
             outcome.summaryProvider = draft?.provider
             outcome.notice = notices.isEmpty
-                ? (draft == nil ? "No audio could be transcribed." : nil)
+                ? ((draft == nil && priorSegments.isEmpty) ? "No audio could be transcribed." : nil)
                 : notices.joined(separator: " ")
             return outcome
         }
@@ -125,29 +136,33 @@ enum ProcessingPipeline {
         let myName = NSFullUserName().isEmpty ? "Me" : NSFullUserName()
         let (segments, speakers) = SpeakerLabeler.label(
             mic: micOut, system: systemOut, systemTurns: turns, myName: myName)
-        try? archive.saveTranscript(segments, for: id)
-        outcome.speakers = speakers
+        let offsetSegments = Self.offsetSegments(segments, by: appendOffset)
+        let mergedSegments = priorSegments + offsetSegments
+        try? archive.saveTranscript(mergedSegments, for: id)
+        outcome.speakers = Self.mergingSpeakers(existing: meeting.speakers, new: speakers)
         var labeled = meeting
-        labeled.speakers = speakers
+        labeled.speakers = outcome.speakers ?? meeting.speakers
 
         // 3. Improve the notes off the accurate transcript (or write them for the
         //    first time if there was no draft).
         onProgress("Summarizing…")
-        let accurateText = TranscriptFormatter.plainText(segments, speakers: speakers)
+        let accurateText = TranscriptFormatter.plainText(mergedSegments, speakers: labeled.speakers)
         let finalOutcome: SummaryOutcome
-        if let draft, sameContent(liveSegments, segments) {
+        if let draft, priorSegments.isEmpty, sameContent(liveSegments, segments) {
             // The accurate transcript carries the same words as the live one, so the
             // draft already reflects them — skip a second model call.
             finalOutcome = .success(draft.text, provider: draft.provider)
         } else if draft != nil {
             // Improve quietly: the draft stays on screen (badge: "Draft · improving")
             // and is replaced atomically when the better version lands.
-            finalOutcome = await summarize(meeting: labeled, transcript: accurateText)
+            finalOutcome = await summarize(
+                meeting: labeled, transcript: accurateText, userNotes: userNotes)
         } else {
             // No draft — stream the sole pass into the notes.
             onSummary(.streaming(""))
             finalOutcome = await summarize(
-                meeting: labeled, transcript: accurateText, onDelta: { onSummary(.streaming($0)) })
+                meeting: labeled, transcript: accurateText, userNotes: userNotes,
+                onDelta: { onSummary(.streaming($0)) })
         }
 
         switch finalOutcome {
@@ -192,12 +207,37 @@ enum ProcessingPipeline {
         return signature(a) == signature(b)
     }
 
+    private static func appendOffset(meeting: Meeting, prior: [TranscriptSegment]) -> TimeInterval {
+        guard !prior.isEmpty else { return 0 }
+        return max(meeting.duration, prior.map(\.end).max() ?? 0)
+    }
+
+    private static func offsetSegments(
+        _ segments: [TranscriptSegment], by offset: TimeInterval
+    ) -> [TranscriptSegment] {
+        segments.map { seg in
+            var s = seg
+            s.start += offset
+            s.end += offset
+            return s
+        }
+    }
+
+    private static func mergingSpeakers(existing: [Speaker], new: [Speaker]) -> [Speaker] {
+        var merged = existing
+        for speaker in new where !merged.contains(where: { $0.id == speaker.id }) {
+            merged.append(speaker)
+        }
+        return merged
+    }
+
     /// Routes to the user's chosen assistant first. Apple Intelligence is the default
     /// on-device path; Claude/Codex run first when selected. When `onDelta` is given,
     /// the chosen engine streams its markdown as it's generated.
     static func summarize(
         meeting: Meeting,
         transcript: String,
+        userNotes: String = "",
         onDelta: (@Sendable (String) -> Void)? = nil
     ) async -> SummaryOutcome {
         guard !transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
@@ -207,12 +247,23 @@ enum ProcessingPipeline {
         let template = templates.template(named: meeting.templateName ?? AppSettings.defaultTemplate)
             ?? TemplateStore.builtins[0]
         let filled = TemplateRenderer.fill(template.body, meeting: meeting)
-        let prompt = """
+        var prompt = """
         Write meeting notes from the transcript provided as input, following this \
         template exactly (keep its headings; omit sections that would be empty):
 
         \(filled)
         """
+        let trimmedNotes = userNotes.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedNotes.isEmpty {
+            prompt += """
+
+
+            The meeting organizer took these notes during the call — treat them as \
+            authoritative context and weave them into the summary where relevant:
+
+            \(trimmedNotes)
+            """
+        }
         let systemPrompt = "You are Parfait, a meeting notetaker. Output only clean Markdown notes — no preamble, no code fences."
 
         // Each engine returns a summary, or nil if it's unavailable or errors (so we

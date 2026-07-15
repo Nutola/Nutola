@@ -6,6 +6,7 @@ struct MenuBarView: View {
     @Environment(\.openWindow) private var openWindow
     @Environment(\.openSettings) private var openSettings
     @Environment(\.colorScheme) private var scheme
+    @Environment(\.parfaitActionColor) private var actionColor
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -25,13 +26,14 @@ struct MenuBarView: View {
                         .padding(.vertical, 6)
                 }
                 .buttonStyle(.borderedProminent)
-                .tint(Theme.raspberry)
+                .tint(actionColor)
             }
             if let error = app.lastError {
                 Label(error, systemImage: "exclamationmark.triangle")
                     .font(.parfait(11))
                     .foregroundStyle(.orange)
             }
+            upcoming
             recent
             Divider()
             HStack {
@@ -46,13 +48,106 @@ struct MenuBarView: View {
                     Image(systemName: "power")
                 }
                 .buttonStyle(.plain)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.red)
                 .help("Quit Parfait")
             }
         }
         .padding(14)
         .frame(width: 320)
         .background(MenuBarExtraWindowHook())
+        .task { await app.calendar.refreshAgenda() }
+    }
+
+    private var upcomingDays: [UpcomingMeetingsDay] {
+        app.calendar.upcomingDays(limit: UpcomingMeetings.defaultLimit)
+    }
+
+    private var upcoming: some View {
+        Group {
+            if AppSettings.useCalendar, CalendarAuthorization.isAuthorized, !upcomingDays.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Coming up")
+                        .font(.parfait(11, .semibold))
+                        .foregroundStyle(.secondary)
+
+                    if let first = upcomingDays.first?.events.first {
+                        if first.isInProgress, let endsIn = app.calendar.endsInText(for: first) {
+                            Text("Ends \(endsIn)")
+                                .font(.parfait(11, .semibold))
+                                .foregroundStyle(.secondary)
+                        } else if let startsIn = app.calendar.startsInText(for: first) {
+                            Text("Starts \(startsIn)")
+                                .font(.parfait(11, .semibold))
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+
+                    // Plain VStack — ScrollView collapses to zero height inside MenuBarExtra panels.
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(upcomingDays) { day in
+                            VStack(alignment: .leading, spacing: 2) {
+                                if day.label != "Today" {
+                                    Text(day.label)
+                                        .font(.parfait(11, .semibold))
+                                        .foregroundStyle(.secondary)
+                                        .padding(.top, day.id == upcomingDays.first?.id ? 0 : 4)
+                                }
+                                ForEach(day.events, id: \.rowID) { event in
+                                    upcomingRow(event, peers: day.events)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func upcomingRow(_ event: CalendarEventSummary, peers: [CalendarEventSummary]) -> some View {
+        let showJoin = event.shouldShowJoinButton(among: peers)
+        return HStack(alignment: .top, spacing: 6) {
+            Button {
+                dismissMenu()
+                app.openCalendarEvent(event)
+            } label: {
+                HStack(alignment: .top, spacing: 8) {
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(event.title)
+                            .font(.parfait(12, .medium))
+                            .lineLimit(2)
+                        HStack(spacing: 6) {
+                            if let countdown = app.calendar.countdownText(for: event) {
+                                Text(countdown)
+                                    .font(.parfait(10, .semibold))
+                                    .foregroundStyle(event.isInProgress ? Theme.mint(scheme) : Theme.honey(scheme))
+                            }
+                            Text(CalendarTimeFormatter.timeRange(start: event.start, end: event.end))
+                                .font(.parfait(10))
+                                .foregroundStyle(Theme.secondary(scheme))
+                        }
+                        if let location = event.location {
+                            Text(location)
+                                .font(.parfait(9))
+                                .foregroundStyle(Theme.tertiary(scheme))
+                                .lineLimit(1)
+                        }
+                    }
+                    .calendarEventIndicator(event.calendarColor.swiftUIColor)
+                    Spacer(minLength: 0)
+                }
+                .contentShape(Rectangle())
+                .padding(.vertical, 3)
+            }
+            .buttonStyle(.plain)
+            .disabled(app.isRecording || event.isPast())
+
+            if showJoin, let url = event.conferenceURL {
+                ConferenceJoinButton(label: event.joinLabel, url: url)
+            } else if event.conferenceURL != nil {
+                ConferenceVideoIcon()
+                    .padding(.top, 1)
+            }
+        }
     }
 
     private var header: some View {
@@ -60,6 +155,7 @@ struct MenuBarView: View {
             ParfaitStripes().scaleEffect(0.45).frame(width: 20, height: 26)
             Text("Parfait")
                 .font(.parfait(16, .bold))
+                .foregroundStyle(Theme.heading(scheme))
             Spacer()
             Button {
                 dismissMenu()
@@ -85,7 +181,7 @@ struct MenuBarView: View {
                     Text("Record meeting").font(.parfait(12, .semibold))
                 }
                 .buttonStyle(.borderedProminent)
-                .tint(Theme.raspberry)
+                .tint(actionColor)
                 Button("Dismiss") { app.dismissDetection() }
                     .buttonStyle(.bordered)
                     .font(.parfait(12))
@@ -167,6 +263,7 @@ private struct RecordingCard: View {
     @ObservedObject var session: RecordingSession
     let meeting: Meeting?
     @EnvironmentObject private var app: AppState
+    @Environment(\.parfaitActionColor) private var actionColor
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -178,7 +275,7 @@ private struct RecordingCard: View {
                 Spacer()
                 Text(timeString(session.elapsed))
                     .font(.system(size: 13, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(Theme.raspberry)
+                    .foregroundStyle(actionColor)
             }
             HStack(alignment: .bottom) {
                 LevelMeter(level: session.micLevel)
@@ -198,20 +295,30 @@ private struct RecordingCard: View {
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
-                .tint(Theme.raspberry)
+                .tint(actionColor)
                 Button {
                     app.discardRecording()
                 } label: {
                     Image(systemName: "trash")
                 }
                 .buttonStyle(.bordered)
+                .tint(.red)
                 .help("Discard this recording")
             }
-            if app.recordingCardDismissed {
+            if app.showLiveRecordingCard, app.recordingCardDismissed {
                 Button {
                     app.recordingCardDismissed = false
                 } label: {
                     Label("Show live transcript card", systemImage: "rectangle.on.rectangle")
+                        .font(.parfait(11))
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(Theme.blueberry)
+            } else if app.showLiveRecordingCard, app.recordingCardMinimized {
+                Button {
+                    app.recordingCardMinimized = false
+                } label: {
+                    Label("Expand live transcript card", systemImage: "arrow.up.left.and.arrow.down.right")
                         .font(.parfait(11))
                 }
                 .buttonStyle(.plain)

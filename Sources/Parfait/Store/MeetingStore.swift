@@ -60,6 +60,12 @@ final class MeetingStore: ObservableObject {
         try? archive.saveSummary(markdown, for: id)
     }
 
+    func sideNotes(for id: UUID) -> String { archive.sideNotes(for: id) }
+
+    func saveSideNotes(_ text: String, for id: UUID) {
+        try? archive.saveSideNotes(text, for: id)
+    }
+
     /// Rename a speaker everywhere in one meeting.
     func renameSpeaker(meetingID: UUID, speakerID: String, to newName: String) {
         guard var m = meeting(id: meetingID) else { return }

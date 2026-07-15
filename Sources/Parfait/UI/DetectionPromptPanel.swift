@@ -10,6 +10,158 @@ private final class FloatingPanel: NSPanel {
     override var canBecomeKey: Bool { true }
 }
 
+/// Persists and applies floating-panel placement. Auto-position only until the user drags.
+@MainActor
+private final class FloatingPanelPlacement {
+    private let originXKey: String
+    private let originYKey: String
+    private var moveObserver: NSObjectProtocol?
+    private(set) var userPlaced: Bool
+    private var suppressMoveSaves = false
+    var onUserMoved: ((NSWindow) -> Void)?
+
+    init(originXKey: String, originYKey: String) {
+        self.originXKey = originXKey
+        self.originYKey = originYKey
+        userPlaced = AppSettings.defaults.object(forKey: originXKey) != nil
+    }
+
+    func place(_ panel: NSWindow, defaultFrame: () -> NSRect) {
+        let size = panel.frame.size
+        if userPlaced, let origin = savedOrigin {
+            panel.setFrameOrigin(clamped(origin, size: size))
+        } else {
+            panel.setFrame(defaultFrame(), display: false)
+        }
+    }
+
+    func bindMoveNotifications(for panel: NSWindow) {
+        guard moveObserver == nil else { return }
+        moveObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.didMoveNotification, object: panel, queue: .main
+        ) { [weak self, weak panel] _ in
+            Task { @MainActor in
+                guard let self, let panel, !self.suppressMoveSaves else { return }
+                self.save(panel.frame.origin)
+                self.userPlaced = true
+                self.onUserMoved?(panel)
+            }
+        }
+    }
+
+    /// Pins the pill's top-trailing corner in screen space while the panel resizes.
+    func setFrameKeepingPillAnchor(_ panel: NSWindow, size: NSSize, pillAnchor: NSPoint) {
+        suppressMoveSaves = true
+        defer { suppressMoveSaves = false }
+        let inset = RecordingPillLayout.inset
+        let origin = clamped(
+            NSPoint(
+                x: pillAnchor.x + inset - size.width,
+                y: pillAnchor.y + inset - size.height),
+            size: size)
+        panel.setFrame(NSRect(origin: origin, size: size), display: true)
+    }
+
+    /// Keeps the panel's top-trailing corner fixed so the pill handle stays put.
+    func resizeKeepingTopRight(_ panel: NSWindow, size: NSSize) {
+        suppressMoveSaves = true
+        defer { suppressMoveSaves = false }
+        let topRight = NSPoint(x: panel.frame.maxX, y: panel.frame.maxY)
+        let origin = clamped(
+            NSPoint(x: topRight.x - size.width, y: topRight.y - size.height),
+            size: size)
+        panel.setFrame(NSRect(origin: origin, size: size), display: true)
+    }
+
+    func clampedOrigin(_ origin: NSPoint, size: NSSize) -> NSPoint {
+        clamped(origin, size: size)
+    }
+
+    private func save(_ origin: NSPoint) {
+        AppSettings.defaults.set(origin.x, forKey: originXKey)
+        AppSettings.defaults.set(origin.y, forKey: originYKey)
+    }
+
+    private var savedOrigin: NSPoint? {
+        guard AppSettings.defaults.object(forKey: originXKey) != nil else { return nil }
+        return NSPoint(
+            x: AppSettings.defaults.double(forKey: originXKey),
+            y: AppSettings.defaults.double(forKey: originYKey))
+    }
+
+    private func clamped(_ origin: NSPoint, size: NSSize) -> NSPoint {
+        guard let screen = panelScreen(for: origin) ?? NSScreen.main else { return origin }
+        let visible = screen.visibleFrame
+        let x = min(max(origin.x, visible.minX), visible.maxX - size.width)
+        let y = min(max(origin.y, visible.minY), visible.maxY - size.height)
+        return NSPoint(x: x, y: y)
+    }
+
+    private func panelScreen(for origin: NSPoint) -> NSScreen? {
+        NSScreen.screens.first { NSMouseInRect(origin, $0.frame, false) }
+    }
+}
+
+/// Drag handle that moves the hosting NSPanel without stealing button clicks elsewhere.
+private struct WindowDragArea: NSViewRepresentable {
+    func makeNSView(context: Context) -> DragAreaView { DragAreaView() }
+    func updateNSView(_ nsView: DragAreaView, context: Context) {}
+
+    final class DragAreaView: NSView {
+        override var mouseDownCanMoveWindow: Bool { true }
+        override func mouseDown(with event: NSEvent) {
+            window?.performDrag(with: event)
+        }
+    }
+}
+
+/// Pill handle: drag anywhere, click without moving toggles expand/collapse.
+private struct PillHandleArea: NSViewRepresentable {
+    var onClick: () -> Void
+
+    func makeNSView(context: Context) -> PillHandleView {
+        let view = PillHandleView()
+        view.onClick = onClick
+        return view
+    }
+
+    func updateNSView(_ nsView: PillHandleView, context: Context) {
+        nsView.onClick = onClick
+    }
+
+    final class PillHandleView: NSView {
+        var onClick: (() -> Void)?
+        private var dragStartMouse: NSPoint = .zero
+        private var dragStartOrigin: NSPoint = .zero
+        private var dragged = false
+        private let clickThreshold: CGFloat = 4
+
+        override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+        override func mouseDown(with event: NSEvent) {
+            dragged = false
+            dragStartMouse = NSEvent.mouseLocation
+            dragStartOrigin = window?.frame.origin ?? .zero
+        }
+
+        override func mouseDragged(with event: NSEvent) {
+            guard let window else { return }
+            let current = NSEvent.mouseLocation
+            let delta = NSPoint(
+                x: current.x - dragStartMouse.x,
+                y: current.y - dragStartMouse.y)
+            if hypot(delta.x, delta.y) >= clickThreshold { dragged = true }
+            window.setFrameOrigin(NSPoint(
+                x: dragStartOrigin.x + delta.x,
+                y: dragStartOrigin.y + delta.y))
+        }
+
+        override func mouseUp(with event: NSEvent) {
+            if !dragged { onClick?() }
+        }
+    }
+}
+
 /// Shows/hides the floating detection prompt in lockstep with `AppState.detectedAppName`.
 /// Owned by the AppDelegate for the app's lifetime.
 @MainActor
@@ -39,7 +191,8 @@ final class DetectionPromptController {
             let host = NSHostingController(rootView: DetectionPromptView(
                 appName: appName,
                 onRecord: { Task { await AppState.shared.acceptDetection() } },
-                onDismiss: { AppState.shared.dismissDetection() }))
+                onDismiss: { AppState.shared.dismissDetection() })
+                .parfaitAppearance())
             panel.contentViewController = host
             panel.setContentSize(host.view.fittingSize)
         }
@@ -77,72 +230,305 @@ final class DetectionPromptController {
     }
 }
 
-/// Shows/hides a floating recording card (live transcript + "Ask Claude live") in
-/// lockstep with `AppState.session`. Sibling of DetectionPromptController; the two
-/// never show at once (detection clears the moment recording starts). Owned by the
-/// AppDelegate for the app's lifetime.
+/// Layout metrics for the recording pill — shared with panel placement so the handle
+/// doesn't shift when the expanded card is shown or hidden.
+private enum RecordingPillLayout {
+    static let inset: CGFloat = 6
+    static let cardInset: CGFloat = 8
+    /// Visual space between the expanded card and the pill.
+    static let gap: CGFloat = 2
+    static let width: CGFloat = 44
+    /// Stripes (19) + spacing (14) + indicator (16) + vertical padding (24).
+    static let height: CGFloat = 73
+    /// Matches `RecordingExpandedCardView` (300 + 12 padding each side).
+    static let cardWidth: CGFloat = 324
+    /// Header + transcript (190) + buttons + spacing + card padding.
+    static let cardHeight: CGFloat = 286
+
+    static var minimizedSize: NSSize {
+        NSSize(width: gap + width + inset, height: inset + height + inset)
+    }
+
+    static var cardPanelSize: NSSize {
+        NSSize(
+            width: cardInset + cardWidth + gap,
+            height: cardInset + cardHeight + cardInset)
+    }
+
+    static func cardOrigin(leftOf pillFrame: NSRect, cardSize: NSSize = cardPanelSize) -> NSPoint {
+        NSPoint(x: pillFrame.minX - cardSize.width, y: pillFrame.maxY - cardSize.height)
+    }
+
+    static func pillFrame(anchor: NSPoint) -> NSRect {
+        let size = minimizedSize
+        return NSRect(
+            x: anchor.x + inset - size.width,
+            y: anchor.y + inset - size.height,
+            width: size.width,
+            height: size.height)
+    }
+
+    static func pillAnchor(in panelFrame: NSRect) -> NSPoint {
+        NSPoint(x: panelFrame.maxX - inset, y: panelFrame.maxY - inset)
+    }
+
+    static func defaultPillAnchor(on screen: NSScreen) -> NSPoint {
+        let visible = screen.visibleFrame
+        return NSPoint(
+            x: visible.maxX - 16 - inset,
+            y: visible.midY + height / 2)
+    }
+}
+
+/// Drag handle that moves the pill panel; the expanded card follows.
+private struct CardDragArea: NSViewRepresentable {
+    var pillPanel: NSWindow?
+    var onMoved: () -> Void
+
+    func makeNSView(context: Context) -> CardDragView {
+        let view = CardDragView()
+        view.pillPanel = pillPanel
+        view.onMoved = onMoved
+        return view
+    }
+
+    func updateNSView(_ nsView: CardDragView, context: Context) {
+        nsView.pillPanel = pillPanel
+        nsView.onMoved = onMoved
+    }
+
+    final class CardDragView: NSView {
+        weak var pillPanel: NSWindow?
+        var onMoved: (() -> Void)?
+        private var dragStartMouse = NSPoint.zero
+        private var dragStartOrigin = NSPoint.zero
+
+        override func mouseDown(with event: NSEvent) {
+            dragStartMouse = NSEvent.mouseLocation
+            dragStartOrigin = pillPanel?.frame.origin ?? .zero
+        }
+
+        override func mouseDragged(with event: NSEvent) {
+            guard let pillPanel else { return }
+            let current = NSEvent.mouseLocation
+            pillPanel.setFrameOrigin(NSPoint(
+                x: dragStartOrigin.x + current.x - dragStartMouse.x,
+                y: dragStartOrigin.y + current.y - dragStartMouse.y))
+            onMoved?()
+        }
+    }
+}
+
+/// Shows/hides separate pill + expanded-card panels in lockstep with `AppState.session`.
 @MainActor
 final class RecordingCardController {
-    private var panel: FloatingPanel?
+    private var pillPanel: FloatingPanel?
+    private var cardPanel: FloatingPanel?
     private var shownID: UUID?
+    private var placedForSession = false
+    private var cardVisible = false
     private var cancellable: AnyCancellable?
+    private let placement = FloatingPanelPlacement(
+        originXKey: SettingsKey.recordingCardOriginX,
+        originYKey: SettingsKey.recordingCardOriginY)
 
     init() {
+        placement.onUserMoved = { [weak self] _ in self?.syncCardPanel(animated: false) }
         cancellable = AppState.shared.$session
-            .combineLatest(AppState.shared.$recordingCardDismissed)
-            .removeDuplicates { $0.0?.meetingID == $1.0?.meetingID && $0.1 == $1.1 }
-            .sink { [weak self] session, dismissed in self?.update(session: session, dismissed: dismissed) }
+            .combineLatest(
+                AppState.shared.$recordingCardDismissed,
+                AppState.shared.$recordingCardMinimized,
+                AppState.shared.$showLiveRecordingCard)
+            .removeDuplicates {
+                $0.0?.meetingID == $1.0?.meetingID
+                    && $0.1 == $1.1
+                    && $0.2 == $1.2
+                    && $0.3 == $1.3
+            }
+            .sink { [weak self] session, dismissed, minimized, showCard in
+                self?.update(
+                    session: session,
+                    dismissed: dismissed,
+                    minimized: minimized,
+                    showCard: showCard)
+            }
     }
 
-    private func update(session: RecordingSession?, dismissed: Bool) {
+    private func update(
+        session: RecordingSession?,
+        dismissed: Bool,
+        minimized: Bool,
+        showCard: Bool
+    ) {
         guard let session else {
             shownID = nil
-            panel?.orderOut(nil)
+            placedForSession = false
+            cardVisible = false
+            hidePanels()
             return
         }
-        guard !dismissed else {
-            panel?.orderOut(nil) // keep shownID so reopening reuses the same card
+        guard showCard, !dismissed else {
+            hidePanels(keepSession: true)
             return
         }
-        let panel = ensurePanel()
+
+        let pill = ensurePillPanel()
+        let card = ensureCardPanel()
+
         if session.meetingID != shownID {
             shownID = session.meetingID
-            let host = NSHostingController(rootView: RecordingCardView(
-                session: session,
-                onAsk: { _ = AIAsk.openLive() },
-                onClose: { AppState.shared.recordingCardDismissed = true },
-                onStop: { Task { await AppState.shared.stopRecording() } }))
-            panel.contentViewController = host
-            panel.setContentSize(host.view.fittingSize)
+            placedForSession = false
+            cardVisible = false
+            rebuildContent(session: session)
         }
-        position(panel)
-        panel.orderFrontRegardless()
+
+        if !placedForSession {
+            pill.setContentSize(RecordingPillLayout.minimizedSize)
+            if placement.userPlaced {
+                placement.place(pill) { pill.frame }
+            } else {
+                defaultPillPosition(pill)
+            }
+            placedForSession = true
+        }
+
+        let targetVisible = !minimized
+        let animate = cardVisible != targetVisible && placedForSession
+        setCardVisible(targetVisible, animated: animate)
+        pill.orderFrontRegardless()
+        if !minimized {
+            card.orderFrontRegardless()
+            pill.orderFrontRegardless()
+        }
     }
 
-    private func ensurePanel() -> FloatingPanel {
-        if let panel { return panel }
+    private func setCardVisible(_ visible: Bool, animated: Bool) {
+        guard let card = cardPanel, pillPanel != nil else { return }
+        guard visible != cardVisible else {
+            if visible { syncCardPanel(animated: false) }
+            return
+        }
+        cardVisible = visible
+
+        if visible {
+            syncCardPanel(animated: false)
+            card.alphaValue = animated ? 0 : 1
+            card.orderFrontRegardless()
+            guard animated else { return }
+            let target = card.frame
+            var start = target
+            start.origin.x += 16
+            card.setFrame(start, display: false)
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = 0.2
+                ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                card.animator().alphaValue = 1
+                card.animator().setFrame(target, display: true)
+            }
+        } else {
+            guard animated, card.isVisible else {
+                card.orderOut(nil)
+                card.alphaValue = 1
+                return
+            }
+            let start = card.frame
+            var end = start
+            end.origin.x += 16
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = 0.15
+                ctx.timingFunction = CAMediaTimingFunction(name: .easeIn)
+                card.animator().alphaValue = 0
+                card.animator().setFrame(end, display: true)
+            } completionHandler: {
+                card.orderOut(nil)
+                card.alphaValue = 1
+                card.setFrame(start, display: false)
+            }
+        }
+    }
+
+    private func syncCardPanel(animated: Bool) {
+        guard let card = cardPanel, let pill = pillPanel else { return }
+        let size = RecordingPillLayout.cardPanelSize
+        let origin = placement.clampedOrigin(
+            RecordingPillLayout.cardOrigin(leftOf: pill.frame, cardSize: size),
+            size: size)
+        let frame = NSRect(origin: origin, size: size)
+        guard animated else {
+            card.setFrame(frame, display: true)
+            return
+        }
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.2
+            card.animator().setFrame(frame, display: true)
+        }
+    }
+
+    private func hidePanels(keepSession: Bool = false) {
+        cardPanel?.orderOut(nil)
+        pillPanel?.orderOut(nil)
+        if !keepSession {
+            cardVisible = false
+        }
+    }
+
+    private func rebuildContent(session: RecordingSession) {
+        let app = AppState.shared
+        let pillHost = NSHostingController(rootView: RecordingPillPanelView(
+            session: session,
+            minimized: Binding(
+                get: { app.recordingCardMinimized },
+                set: { app.recordingCardMinimized = $0 }))
+            .parfaitAppearance())
+        pillPanel?.contentViewController = pillHost
+        pillPanel?.setContentSize(RecordingPillLayout.minimizedSize)
+
+        let cardHost = NSHostingController(rootView: RecordingExpandedCardView(
+            session: session,
+            pillPanel: pillPanel,
+            onMoved: { [weak self] in self?.syncCardPanel(animated: false) },
+            onMinimize: { app.recordingCardMinimized = true },
+            onAsk: { _ = AIAsk.openLive() },
+            onStop: { Task { await app.stopRecording() } })
+            .parfaitAppearance())
+        cardPanel?.contentViewController = cardHost
+        cardPanel?.setContentSize(RecordingPillLayout.cardPanelSize)
+    }
+
+    private func ensurePillPanel() -> FloatingPanel {
+        if let pillPanel { return pillPanel }
+        let panel = makePanel(size: RecordingPillLayout.minimizedSize)
+        placement.bindMoveNotifications(for: panel)
+        pillPanel = panel
+        return panel
+    }
+
+    private func ensureCardPanel() -> FloatingPanel {
+        if let cardPanel { return cardPanel }
+        let panel = makePanel(size: RecordingPillLayout.cardPanelSize)
+        cardPanel = panel
+        return panel
+    }
+
+    private func makePanel(size: NSSize) -> FloatingPanel {
         let panel = FloatingPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 360, height: 360),
+            contentRect: NSRect(origin: .zero, size: size),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered, defer: false)
-        panel.level = .floating
+        panel.level = .statusBar
         panel.isFloatingPanel = true
         panel.hidesOnDeactivate = false
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.backgroundColor = .clear
         panel.isOpaque = false
         panel.hasShadow = false
-        self.panel = panel
         return panel
     }
 
-    private func position(_ panel: FloatingPanel) {
+    private func defaultPillPosition(_ pill: FloatingPanel) {
         guard let screen = NSScreen.main else { return }
-        let visible = screen.visibleFrame
-        let size = panel.frame.size
-        panel.setFrameOrigin(NSPoint(
-            x: visible.maxX - size.width + 8,
-            y: visible.maxY - size.height + 8))
+        let anchor = RecordingPillLayout.defaultPillAnchor(on: screen)
+        pill.setFrame(RecordingPillLayout.pillFrame(anchor: anchor), display: false)
     }
 }
 
@@ -151,11 +537,12 @@ private struct DetectionPromptView: View {
     let onRecord: () -> Void
     let onDismiss: () -> Void
     @Environment(\.colorScheme) private var scheme
+    @Environment(\.parfaitActionColor) private var actionColor
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
-                Image(systemName: "record.circle.fill").foregroundStyle(Theme.raspberry)
+                Image(systemName: "record.circle.fill").foregroundStyle(actionColor)
                 Text("Record this meeting?")
                     .font(.parfait(15, .semibold))
                     .foregroundStyle(Theme.ink(scheme))
@@ -171,7 +558,7 @@ private struct DetectionPromptView: View {
                         .padding(.vertical, 3)
                 }
                 .buttonStyle(.borderedProminent)
-                .tint(Theme.raspberry)
+                .tint(actionColor)
                 Button("Dismiss", action: onDismiss)
                     .font(.parfait(13))
                     .buttonStyle(.bordered)
@@ -186,12 +573,55 @@ private struct DetectionPromptView: View {
     }
 }
 
-private struct RecordingCardView: View {
+private struct RecordingPillPanelView: View {
     @ObservedObject var session: RecordingSession
-    let onAsk: () -> Void
-    let onClose: () -> Void
-    let onStop: () -> Void
+    @Binding var minimized: Bool
     @Environment(\.colorScheme) private var scheme
+
+    var body: some View {
+        pillHandle
+            .padding(.top, RecordingPillLayout.inset)
+            .padding(.trailing, RecordingPillLayout.inset)
+            .padding(.bottom, RecordingPillLayout.inset)
+            .padding(.leading, RecordingPillLayout.gap)
+    }
+
+    private var pillHandle: some View {
+        VStack(spacing: 14) {
+            ParfaitStripes()
+                .scaleEffect(0.32)
+                .frame(width: 15, height: 19)
+            Group {
+                if minimized {
+                    MeterBars(level: session.micLevel, delays: [0, 0.09, 0.18])
+                } else {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(.tertiary)
+                }
+            }
+            .frame(height: 16)
+        }
+        .padding(.vertical, 12)
+        .padding(.horizontal, 8)
+        .frame(width: RecordingPillLayout.width)
+        .background(Theme.surface(scheme), in: Capsule())
+        .overlay(Capsule().strokeBorder(.primary.opacity(0.10)))
+        .shadow(color: .black.opacity(0.18), radius: 8, y: 3)
+        .overlay { PillHandleArea(onClick: { minimized.toggle() }) }
+        .help(minimized ? "Expand live transcript" : "Minimize")
+    }
+}
+
+private struct RecordingExpandedCardView: View {
+    @ObservedObject var session: RecordingSession
+    var pillPanel: NSWindow?
+    var onMoved: () -> Void
+    var onMinimize: () -> Void
+    var onAsk: () -> Void
+    var onStop: () -> Void
+    @Environment(\.colorScheme) private var scheme
+    @Environment(\.parfaitActionColor) private var actionColor
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -200,17 +630,18 @@ private struct RecordingCardView: View {
                 Text("Recording")
                     .font(.parfait(14, .semibold))
                     .foregroundStyle(Theme.ink(scheme))
-                Spacer()
+                Spacer(minLength: 0)
                 Text(timeString(session.elapsed))
                     .font(.system(size: 12, weight: .semibold, design: .monospaced))
                     .foregroundStyle(.secondary)
-                Button(action: onClose) {
+                Button(action: onMinimize) {
                     Image(systemName: "xmark.circle.fill")
                         .foregroundStyle(.tertiary)
                 }
                 .buttonStyle(.plain)
-                .help("Hide this card — reopen it from the menu bar")
+                .help("Minimize")
             }
+            .background(CardDragArea(pillPanel: pillPanel, onMoved: onMoved))
             transcript
             HStack(spacing: 8) {
                 Button(action: onAsk) {
@@ -220,18 +651,21 @@ private struct RecordingCardView: View {
                         .padding(.vertical, 2)
                 }
                 .buttonStyle(.borderedProminent)
-                .tint(Theme.raspberry)
+                .tint(actionColor)
                 Button("Stop", action: onStop)
                     .font(.parfait(12))
                     .buttonStyle(.bordered)
             }
         }
-        .padding(16)
-        .frame(width: 320, alignment: .leading)
+        .padding(12)
+        .frame(width: 300, alignment: .leading)
         .background(Theme.surface(scheme), in: RoundedRectangle(cornerRadius: 14))
         .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(.primary.opacity(0.08)))
-        .shadow(color: .black.opacity(0.22), radius: 18, y: 8)
-        .padding(20)
+        .shadow(color: .black.opacity(0.22), radius: 12, y: 6)
+        .padding(.top, RecordingPillLayout.cardInset)
+        .padding(.leading, RecordingPillLayout.cardInset)
+        .padding(.bottom, RecordingPillLayout.cardInset)
+        .padding(.trailing, RecordingPillLayout.gap)
     }
 
     private var transcript: some View {

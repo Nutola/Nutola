@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="Resources/AppIcon-1024.png" width="140" alt="Parfait icon — a layered parfait glass">
+  <img src="Resources/AppIcon-1024.png" style="border-radius: 20px" width="140" alt="Parfait icon — a layered parfait glass">
 </p>
 
 <h1 align="center">Parfait</h1>

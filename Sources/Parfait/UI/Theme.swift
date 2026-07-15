@@ -1,7 +1,10 @@
+import AppKit
 import SwiftUI
 
 /// Parfait palette — layered like the dessert: cream, raspberry, honey, blueberry, mint.
 enum Theme {
+    static let defaultActionColorHex = "#E0396B"
+
     static let cream = Color(red: 1.00, green: 0.976, blue: 0.949)          // #FFF9F2 surfaces
     static let creamDeep = Color(red: 0.984, green: 0.945, blue: 0.894)     // #FBF1E4 cards
     static let raspberry = Color(red: 0.878, green: 0.224, blue: 0.420)     // #E0396B primary
@@ -11,21 +14,257 @@ enum Theme {
     static let cocoa = Color(red: 0.263, green: 0.196, blue: 0.169)         // #43322B text
 
     static let cornerRadius: CGFloat = 16
+    /// Main feed column width — matches Granola's centered content layout.
+    static let contentMaxWidth: CGFloat = 800
+
+    /// User-configurable accent for prominent actions (Record, Save, Stop, …).
+    static var action: Color {
+        Color(hex: AppSettings.actionColorHex) ?? raspberry
+    }
 
     /// Card background that stays airy in light mode and warm-dark in dark mode.
     static func surface(_ scheme: ColorScheme) -> Color {
-        scheme == .dark ? Color(red: 0.145, green: 0.125, blue: 0.114) : cream
+        scheme == .dark ? Color(red: 0.09, green: 0.09, blue: 0.09) : cream
     }
     static func card(_ scheme: ColorScheme) -> Color {
-        scheme == .dark ? Color(red: 0.196, green: 0.169, blue: 0.153) : creamDeep
+        scheme == .dark ? Color(red: 0.14, green: 0.14, blue: 0.14) : creamDeep
     }
-    static func ink(_ scheme: ColorScheme) -> Color {
-        scheme == .dark ? Color(red: 0.96, green: 0.94, blue: 0.92) : cocoa
+
+    /// Floating panel and transcript overlay surfaces (Granola-style).
+    static func panel(_ scheme: ColorScheme) -> Color {
+        scheme == .dark ? Color(red: 0.16, green: 0.16, blue: 0.16) : creamDeep
+    }
+
+    static func bubble(_ scheme: ColorScheme, isSelf: Bool) -> Color {
+        if scheme == .dark {
+            return isSelf
+                ? Color(red: 0.22, green: 0.24, blue: 0.30)
+                : Color(red: 0.19, green: 0.19, blue: 0.19)
+        }
+        return isSelf
+            ? Color(red: 0.90, green: 0.92, blue: 0.98)
+            : Color(red: 0.94, green: 0.94, blue: 0.94)
+    }
+
+    static func chip(_ scheme: ColorScheme) -> Color {
+        scheme == .dark
+            ? Color(red: 0.18, green: 0.18, blue: 0.18)
+            : Color(red: 0.94, green: 0.92, blue: 0.88)
+    }
+
+    /// Primary text — titles, meeting names, body copy.
+    static func heading(_ scheme: ColorScheme) -> Color {
+        scheme == .dark
+            ? Color(red: 0.97, green: 0.95, blue: 0.93)
+            : cocoa
+    }
+
+    static func ink(_ scheme: ColorScheme) -> Color { heading(scheme) }
+
+    /// Section labels ("Tomorrow", markdown h2, …) — readable on both surfaces.
+    static func sectionTitle(_ scheme: ColorScheme, accent: Color) -> Color {
+        accent.accentText(on: scheme)
+    }
+
+    /// Secondary metadata — boosted in dark mode so it doesn't disappear on brown surfaces.
+    static func secondary(_ scheme: ColorScheme) -> Color {
+        scheme == .dark
+            ? Color(red: 0.72, green: 0.68, blue: 0.64)
+            : Color(red: 0.42, green: 0.38, blue: 0.34)
+    }
+
+    static func tertiary(_ scheme: ColorScheme) -> Color {
+        scheme == .dark
+            ? Color(red: 0.58, green: 0.54, blue: 0.50)
+            : Color(red: 0.55, green: 0.50, blue: 0.46)
+    }
+
+    static func honey(_ scheme: ColorScheme) -> Color {
+        scheme == .dark
+            ? Color(red: 0.95, green: 0.70, blue: 0.31)   // #F2B24F
+            : honey
+    }
+
+    static func mint(_ scheme: ColorScheme) -> Color {
+        scheme == .dark
+            ? Color(red: 0.45, green: 0.82, blue: 0.62)
+            : mint
+    }
+
+    static func blueberry(_ scheme: ColorScheme) -> Color {
+        scheme == .dark
+            ? Color(red: 0.58, green: 0.66, blue: 0.95)
+            : blueberry
+    }
+
+    /// Prominent button fill — darkened/lightened so white labels meet contrast targets.
+    static func prominentAction(_ color: Color, scheme: ColorScheme) -> Color {
+        color.adjustedForProminentButton(on: scheme, surface: surface(scheme))
+    }
+}
+
+enum ActionColorPreset: String, CaseIterable, Identifiable {
+    case raspberry = "#E0396B"
+    case rose = "#F0708F"
+    case coral = "#FF6B5A"
+    case honey = "#F2A93B"
+    case mint = "#3FB27F"
+    case blueberry = "#5A6ACF"
+    case violet = "#8B5CF6"
+
+    var id: String { rawValue }
+
+    var name: String {
+        switch self {
+        case .raspberry: "Raspberry"
+        case .rose: "Rose"
+        case .coral: "Coral"
+        case .honey: "Honey"
+        case .mint: "Mint"
+        case .blueberry: "Blueberry"
+        case .violet: "Violet"
+        }
+    }
+
+    var color: Color { Color(hex: rawValue) ?? Theme.raspberry }
+}
+
+extension Color {
+    init?(hex: String) {
+        var cleaned = hex.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        if cleaned.hasPrefix("#") { cleaned.removeFirst() }
+        guard cleaned.count == 6, let value = UInt32(cleaned, radix: 16) else { return nil }
+        let red = Double((value >> 16) & 0xFF) / 255
+        let green = Double((value >> 8) & 0xFF) / 255
+        let blue = Double(value & 0xFF) / 255
+        self.init(red: red, green: green, blue: blue)
+    }
+
+    var hexString: String? {
+        guard let rgb = NSColor(self).usingColorSpace(.sRGB) else { return nil }
+        let red = Int((rgb.redComponent * 255).rounded())
+        let green = Int((rgb.greenComponent * 255).rounded())
+        let blue = Int((rgb.blueComponent * 255).rounded())
+        return String(format: "#%02X%02X%02X", red, green, blue)
+    }
+
+    /// Accent text on a surface (section headers, inline highlights).
+    func accentText(on scheme: ColorScheme) -> Color {
+        guard let rgb = NSColor(self).usingColorSpace(.sRGB) else { return self }
+        var h: CGFloat = 0
+        var s: CGFloat = 0
+        var b: CGFloat = 0
+        var a: CGFloat = 0
+        rgb.getHue(&h, saturation: &s, brightness: &b, alpha: &a)
+        if scheme == .dark {
+            b = min(1, b + 0.20)
+            s = min(1, max(0.55, s))
+        } else {
+            b = max(0.30, b * 0.92)
+            s = min(1, max(0.65, s))
+        }
+        return Color(hue: Double(h), saturation: Double(s), brightness: Double(b))
+    }
+
+    /// Button fill tuned for white label contrast and separation from the surface.
+    func adjustedForProminentButton(on scheme: ColorScheme, surface: Color) -> Color {
+        guard let rgb = NSColor(self).usingColorSpace(.sRGB) else { return self }
+        var h: CGFloat = 0
+        var s: CGFloat = 0
+        var b: CGFloat = 0
+        var a: CGFloat = 0
+        rgb.getHue(&h, saturation: &s, brightness: &b, alpha: &a)
+
+        var candidate = hsbColor(h: h, s: s, b: b)
+        while (candidate.contrastRatio(with: Color.white) ?? 0) < 4.5 && b > 0.28 {
+            b -= 0.04
+            s = min(1, s * 1.02)
+            candidate = hsbColor(h: h, s: s, b: b)
+        }
+
+        if scheme == .dark {
+            while (candidate.contrastRatio(with: surface) ?? 0) < 2.8 && b < 0.92 {
+                b += 0.025
+                candidate = hsbColor(h: h, s: s, b: b)
+                if (candidate.contrastRatio(with: Color.white) ?? 0) < 4.5 {
+                    b -= 0.025
+                    candidate = hsbColor(h: h, s: s, b: b)
+                    break
+                }
+            }
+        }
+
+        return candidate
+    }
+
+    func contrastRatio(with other: Color) -> Double? {
+        guard let l1 = relativeLuminance(), let l2 = other.relativeLuminance() else { return nil }
+        let lighter = max(l1, l2)
+        let darker = min(l1, l2)
+        return (lighter + 0.05) / (darker + 0.05)
+    }
+
+    private func relativeLuminance() -> Double? {
+        guard let c = NSColor(self).usingColorSpace(.sRGB) else { return nil }
+        func channel(_ v: CGFloat) -> Double {
+            let v = Double(v)
+            return v <= 0.03928 ? v / 12.92 : pow((v + 0.055) / 1.055, 2.4)
+        }
+        let r = channel(c.redComponent)
+        let g = channel(c.greenComponent)
+        let b = channel(c.blueComponent)
+        return 0.2126 * r + 0.7152 * g + 0.0722 * b
+    }
+
+    private func hsbColor(h: CGFloat, s: CGFloat, b: CGFloat) -> Color {
+        Color(hue: Double(h), saturation: Double(s), brightness: Double(b))
+    }
+}
+
+private struct ParfaitActionColorKey: EnvironmentKey {
+    static let defaultValue = Theme.action
+}
+
+extension EnvironmentValues {
+    var parfaitActionColor: Color {
+        get { self[ParfaitActionColorKey.self] }
+        set { self[ParfaitActionColorKey.self] = newValue }
+    }
+}
+
+struct ParfaitAppearanceModifier: ViewModifier {
+    @Environment(\.colorScheme) private var scheme
+    @AppStorage(SettingsKey.appearanceMode) private var appearanceMode = AppearanceMode.system.rawValue
+    @AppStorage(SettingsKey.actionColorHex) private var actionColorHex = Theme.defaultActionColorHex
+
+    func body(content: Content) -> some View {
+        let base = Color(hex: actionColorHex) ?? Theme.raspberry
+        let action = Theme.prominentAction(base, scheme: scheme)
+        content
+            .preferredColorScheme(AppearanceMode(rawValue: appearanceMode)?.colorScheme)
+            .environment(\.parfaitActionColor, action)
+    }
+}
+
+extension View {
+    func parfaitAppearance() -> some View {
+        modifier(ParfaitAppearanceModifier())
+    }
+
+    /// Constrain and center main content within the detail pane (Granola-style).
+    func contentColumn(alignment: Alignment = .leading) -> some View {
+        frame(maxWidth: Theme.contentMaxWidth, alignment: alignment)
+            .frame(maxWidth: .infinity)
     }
 }
 
 extension Font {
     static func parfait(_ size: CGFloat, _ weight: Font.Weight = .regular) -> Font {
         .system(size: size, weight: weight, design: .rounded)
+    }
+
+    /// Editorial title — Granola-style meeting headings.
+    static func granolaTitle(_ size: CGFloat = 32) -> Font {
+        .system(size: size, weight: .regular, design: .serif)
     }
 }

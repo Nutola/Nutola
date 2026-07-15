@@ -64,6 +64,8 @@ final class LiveTranscriber: @unchecked Sendable {
     var onUpdate: (@Sendable ([TranscriptSegment], String) -> Void)?
 
     private let startDate: Date
+    /// Seconds already on the meeting before this live session (resume recording).
+    private let timeOffset: TimeInterval
     private let lock = NSLock()
     private var finalized: [TranscriptSegment] = []
     private var volatile: [String: String] = [:] // speakerID -> in-progress text
@@ -71,8 +73,9 @@ final class LiveTranscriber: @unchecked Sendable {
     private var started = false
     private var stopped = false
 
-    init(startDate: Date) {
+    init(startDate: Date, timeOffset: TimeInterval = 0) {
         self.startDate = startDate
+        self.timeOffset = timeOffset
     }
 
     /// Sets up both channels. Throws only if no transcriber model is available at
@@ -198,7 +201,7 @@ final class LiveTranscriber: @unchecked Sendable {
 
     private func handle(_ result: SpeechTranscriber.Result, speakerID: String) {
         let text = String(result.text.characters).trimmingCharacters(in: .whitespacesAndNewlines)
-        let elapsed = max(0, Date().timeIntervalSince(startDate))
+        let elapsed = max(0, Date().timeIntervalSince(startDate)) + timeOffset
         lock.lock()
         if result.isFinal {
             volatile[speakerID] = nil

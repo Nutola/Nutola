@@ -4,22 +4,23 @@ import SwiftUI
 struct MeetingDetailView: View {
     @EnvironmentObject private var app: AppState
     @Environment(\.colorScheme) private var scheme
+    @Environment(\.parfaitActionColor) private var actionColor
 
     @State private var meeting: Meeting
-    @State private var tab: Tab = .notes
+    @State private var panelMode: GranolaPanelMode?
     @State private var title: String
     @State private var publishState: PublishState = .idle
     @State private var showDeleteConfirm = false
-    // Edit drafts live here, not in the tab views, so an accidental tab switch
-    // can't destroy ten minutes of transcript fixes. nil = not editing.
     @State private var notesDraft: String?
     @State private var transcriptDraft: String?
+    @State private var showAttendees = false
+    @State private var sideNotes = ""
+    @State private var showSideNotes = false
+    @State private var sideNotesSaveTask: Task<Void, Never>?
+    @AppStorage(SettingsKey.sideNotesPanelWidth) private var sideNotesWidth = 280.0
 
-    enum Tab: String, CaseIterable {
-        case notes = "Notes"
-        case transcript = "Transcript"
-        case ask = "Ask AI"
-    }
+    var backTitle: String?
+    var onBack: (() -> Void)?
 
     enum PublishState: Equatable {
         case idle, working
@@ -27,116 +28,619 @@ struct MeetingDetailView: View {
         case failed(String)
     }
 
-    init(meeting: Meeting) {
+    init(meeting: Meeting, backTitle: String? = nil, onBack: (() -> Void)? = nil) {
         _meeting = State(initialValue: meeting)
         _title = State(initialValue: meeting.title)
+        self.backTitle = backTitle
+        self.onBack = onBack
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            header
-                .padding(20)
-            Divider()
-            content
+        ZStack(alignment: .bottom) {
+            HStack(alignment: .top, spacing: 0) {
+                if showSideNotes {
+                    SideNotesPanel(
+                        text: $sideNotes,
+                        isRecording: isRecordingThisMeeting,
+                        onTextChange: scheduleSideNotesSave)
+                        .frame(width: sideNotesWidth)
+
+                    SideNotesResizeHandle(width: $sideNotesWidth)
+                }
+
+                VStack(spacing: 0) {
+                    topChrome
+                    documentScroll
+                }
+            }
+
+            GranolaFloatingPanel(
+                meeting: meeting,
+                mode: $panelMode,
+                transcriptDraft: $transcriptDraft)
         }
         .background(Theme.surface(scheme))
+        .safeAreaInset(edge: .bottom) {
+            if let join = joinConference, showProminentJoinButton {
+                ConferenceJoinButton(label: join.label, url: join.url, prominent: true)
+                    .frame(maxWidth: 560)
+                    .padding(.horizontal, 24)
+                    .padding(.vertical, 12)
+            }
+        }
+        .task { await app.calendar.refreshAgenda() }
+        .onAppear {
+            loadSideNotes()
+            presentTranscriptIfNeeded()
+        }
+        .onDisappear { showAttendees = false }
         .onChange(of: app.store.meetings) {
             if let fresh = app.store.meetings.first(where: { $0.id == meeting.id }) {
                 meeting = fresh
                 if !isEditingTitle { title = fresh.title }
             }
         }
+        .onChange(of: app.session?.meetingID) { _, id in
+            if id == meeting.id {
+                panelMode = .transcript
+                showSideNotes = true
+            }
+        }
+        .confirmationDialog("Move “\(meeting.title)” to trash?", isPresented: $showDeleteConfirm) {
+            Button("Move to trash", role: .destructive) { app.store.delete(id: meeting.id) }
+                .tint(.red)
+        } message: {
+            Text("This permanently removes the audio, transcript, and notes from your Mac.")
+        }
     }
+
+    private var isRecordingThisMeeting: Bool {
+        app.session?.meetingID == meeting.id
+    }
+
+    private var isPrepMeeting: Bool {
+        meeting.state == .prep && !isRecordingThisMeeting
+    }
+
+    private var hasSideNotes: Bool {
+        !sideNotes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private func loadSideNotes() {
+        sideNotes = app.store.sideNotes(for: meeting.id)
+        showSideNotes = isRecordingThisMeeting || isPrepMeeting || hasSideNotes
+    }
+
+    private func scheduleSideNotesSave() {
+        sideNotesSaveTask?.cancel()
+        let text = sideNotes
+        let id = meeting.id
+        sideNotesSaveTask = Task {
+            try? await Task.sleep(for: .milliseconds(450))
+            guard !Task.isCancelled else { return }
+            app.store.saveSideNotes(text, for: id)
+        }
+    }
+
+    // MARK: - Chrome
+
+    private var topChrome: some View {
+        HStack {
+            if let onBack {
+                Button(action: onBack) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "chevron.left")
+                            .font(.system(size: 11, weight: .semibold))
+                        Text(backTitle ?? "Back")
+                            .font(.parfait(13, .medium))
+                    }
+                    .foregroundStyle(Theme.secondary(scheme))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 6)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+            Spacer()
+            if case .done = publishState {
+                GranolaChip(icon: "checkmark.circle.fill", text: "Shared", accent: Theme.mint(scheme))
+            }
+            publishMenu
+        }
+        .padding(.horizontal, 20)
+        .padding(.top, 12)
+        .padding(.bottom, 4)
+    }
+
+    private var shouldCenterEmptyNotes: Bool {
+        !isRecordingThisMeeting
+            && !isPrepMeeting
+            && notesDraft == nil
+            && displayed.isEmpty
+            && (showSideNotes || !hasSideNotes)
+    }
+
+    private var documentScroll: some View {
+        GeometryReader { geo in
+            ScrollView {
+                VStack(spacing: 20) {
+                    documentHeader
+                    noticeBanner
+                    notesSection
+                }
+                .contentColumn()
+                .frame(minHeight: shouldCenterEmptyNotes ? geo.size.height : nil, alignment: .top)
+                .padding(.horizontal, 28)
+                .padding(.bottom, panelMode != nil ? 340 : 100)
+            }
+        }
+    }
+
+    // MARK: - Document header
 
     @FocusState private var isEditingTitle: Bool
 
-    private var header: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .firstTextBaseline) {
-                TextField("Meeting title", text: $title, axis: .vertical)
-                    .textFieldStyle(.plain)
-                    .font(.parfait(24, .bold))
-                    .lineLimit(2)
-                    .focused($isEditingTitle)
-                    .onSubmit(saveTitle)
-                    .onChange(of: isEditingTitle) { if !isEditingTitle { saveTitle() } }
-                Spacer()
-                publishMenu
-            }
+    private var documentHeader: some View {
+        VStack(spacing: 14) {
+            TextField("Meeting title", text: $title, axis: .vertical)
+                .textFieldStyle(.plain)
+                .font(.granolaTitle(30))
+                .foregroundStyle(Theme.heading(scheme))
+                .multilineTextAlignment(.center)
+                .lineLimit(3)
+                .focused($isEditingTitle)
+                .onSubmit(saveTitle)
+                .onChange(of: isEditingTitle) { if !isEditingTitle { saveTitle() } }
 
-            HStack(spacing: 8) {
-                Text(meeting.createdAt.formatted(date: .complete, time: .shortened))
-                    .font(.parfait(12))
-                    .foregroundStyle(.secondary)
-                if meeting.duration > 0 {
-                    Text("·").foregroundStyle(.tertiary)
-                    Text(TemplateRenderer.duration(meeting.duration))
-                        .font(.parfait(12))
-                        .foregroundStyle(.secondary)
+            metadataChips
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.top, 8)
+    }
+
+    private var metadataChips: some View {
+        FlowLayout(spacing: 8) {
+            Button { showSideNotes.toggle() } label: {
+                GranolaChip(
+                    icon: "note.text",
+                    text: hasSideNotes ? "My notes" : "Write notes",
+                    accent: showSideNotes
+                        ? Theme.mint(scheme)
+                        : (isEmptyTranscriptNotice && !hasSideNotes ? Theme.honey(scheme) : nil))
+            }
+            .buttonStyle(.plain)
+            .help(hasSideNotes ? "Show or hide your notes" : "Open notes to write what happened")
+
+            if !summary.isEmpty {
+                GranolaChip(icon: "sparkles", text: "Enhanced")
+            }
+            GranolaChip(
+                icon: "calendar",
+                text: meeting.createdAt.formatted(.dateTime.month(.abbreviated).day()))
+            if meeting.duration > 0 {
+                GranolaChip(
+                    icon: "clock",
+                    text: TemplateRenderer.duration(meeting.duration))
+            }
+            if let join = joinConference, !showProminentJoinButton {
+                Button { ConferenceJoiner.open(join.url) } label: {
+                    GranolaChip(
+                        icon: "video.fill",
+                        text: join.label,
+                        accent: Theme.blueberry(scheme))
                 }
-                if let source = meeting.sourceApp {
-                    Text("·").foregroundStyle(.tertiary)
-                    Text(source).font(.parfait(12)).foregroundStyle(.secondary)
+                .buttonStyle(.plain)
+            }
+            if !meeting.attendees.isEmpty {
+                Button { showAttendees = true } label: {
+                    GranolaChip(
+                        icon: "person.2",
+                        text: attendeeChipLabel)
                 }
-                ProviderBadge(provider: meeting.summaryProvider)
-                Spacer()
-                if let stage = app.processingStage[meeting.id] {
+                .buttonStyle(.plain)
+                .help("Show all participants")
+                .popover(isPresented: $showAttendees, arrowEdge: .top) {
+                    attendeesPopover
+                }
+            }
+            folderChipContent
+            if let provider = meeting.summaryProvider {
+                providerChip(provider)
+            }
+            if let stage = app.processingStage[meeting.id] {
+                GranolaChip(icon: nil, text: stage, accent: Theme.honey(scheme))
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .center)
+    }
+
+    @ViewBuilder
+    private var folderChipContent: some View {
+        if let folderID = meeting.folderID,
+           let folder = app.folders.folder(id: folderID) {
+            FolderPickerMenu(
+                currentFolderID: folderID,
+                calendarTitle: meeting.calendarEventTitle ?? meeting.title,
+                meetingID: meeting.id
+            ) {
+                GranolaChip(icon: "folder", text: folder.name)
+            }
+            .buttonStyle(.plain)
+        } else {
+            FolderPickerMenu(
+                currentFolderID: nil,
+                calendarTitle: meeting.calendarEventTitle ?? meeting.title,
+                meetingID: meeting.id
+            ) {
+                GranolaChip(icon: "folder.badge.plus", text: "Add to folder")
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
+    private var attendeesPopover: some View {
+        ScrollView {
+            FlowLayout(spacing: 6) {
+                ForEach(meeting.attendees, id: \.self) { Chip(text: $0) }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(12)
+        }
+        .scrollBounceBehavior(.basedOnSize)
+        .frame(minWidth: 280, maxWidth: 380)
+        .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private func providerChip(_ provider: String) -> some View {
+        let label: String
+        switch provider {
+        case "claude": label = "Claude"
+        case "codex": label = "Codex"
+        case "apple": label = "Apple Intelligence"
+        default: label = provider
+        }
+        return GranolaChip(icon: "sparkles", text: label, accent: Theme.raspberry)
+    }
+
+    // MARK: - Notes
+
+    private var summary: String { app.store.summary(for: meeting.id) }
+    private var streaming: String? { app.streamingSummaries[meeting.id] }
+    private var displayed: String { streaming ?? summary }
+
+    private var notesSection: some View {
+        VStack(alignment: shouldCenterEmptyNotes ? .center : .leading, spacing: 12) {
+            if isRecordingThisMeeting {
+                recordingPlaceholder
+            } else if isPrepMeeting {
+                prepPlaceholder
+            } else if notesDraft != nil {
+                notesEditor
+            } else if displayed.isEmpty {
+                if !showSideNotes, hasSideNotes {
+                    myNotesReader
+                } else {
+                    emptyNotes
+                }
+            } else {
+                if !showSideNotes, hasSideNotes {
+                    myNotesReader
+                        .padding(.bottom, 16)
+                }
+                notesReader
+            }
+        }
+        .frame(
+            maxWidth: .infinity,
+            maxHeight: shouldCenterEmptyNotes ? .infinity : nil,
+            alignment: shouldCenterEmptyNotes ? .center : .leading)
+    }
+
+    private var prepPlaceholder: some View {
+        Text("Write notes")
+            .font(.parfait(14))
+            .foregroundStyle(Theme.tertiary(scheme))
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.top, 40)
+    }
+
+    private var recordingPlaceholder: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if showSideNotes {
+                Text("Your notes are in the panel on the left. Enhanced notes will appear here when you stop recording.")
+                    .font(.parfait(13))
+                    .foregroundStyle(Theme.tertiary(scheme))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.top, 40)
+            } else {
+                Text("Write notes")
+                    .font(.parfait(14))
+                    .foregroundStyle(Theme.tertiary(scheme))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.top, 40)
+                    .onTapGesture { showSideNotes = true }
+            }
+        }
+    }
+
+    private var myNotesReader: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("My notes")
+                .font(.parfait(12, .semibold))
+                .foregroundStyle(Theme.secondary(scheme))
+            Text(sideNotes)
+                .font(.parfait(13))
+                .foregroundStyle(Theme.secondary(scheme))
+                .textSelection(.enabled)
+                .lineSpacing(4)
+        }
+    }
+
+    private var notesReader: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                if let progress = app.summaryProgress[meeting.id] {
                     HStack(spacing: 5) {
-                        ProgressView().controlSize(.small)
-                        Text(stage).font(.parfait(12)).foregroundStyle(.secondary)
+                        ProgressView().controlSize(.small).scaleEffect(0.6)
+                        Text(progress == .improving ? "Draft · improving" : "Writing…")
+                            .font(.parfait(11))
+                            .foregroundStyle(Theme.tertiary(scheme))
                     }
                 }
+                Spacer()
+                notesEditMenu
+            }
+            .padding(.bottom, 8)
+
+            if !displayed.isEmpty {
+                Text("Enhanced notes")
+                    .font(.parfait(12, .semibold))
+                    .foregroundStyle(Theme.secondary(scheme))
+                    .padding(.bottom, 8)
             }
 
-            if !meeting.attendees.isEmpty {
-                FlowLayout(spacing: 6) {
-                    ForEach(meeting.attendees, id: \.self) { Chip(text: $0) }
+            MarkdownText(markdown: displayed, style: .document)
+        }
+    }
+
+    private var notesEditor: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Spacer()
+                Button("Cancel") { notesDraft = nil }
+                Button("Save") {
+                    if let notesDraft { app.store.saveSummary(notesDraft, for: meeting.id) }
+                    notesDraft = nil
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(actionColor)
+            }
+            .controlSize(.small)
+
+            TextEditor(text: Binding(get: { notesDraft ?? "" }, set: { notesDraft = $0 }))
+                .font(.system(size: 13, design: .monospaced))
+                .scrollContentBackground(.hidden)
+                .frame(minHeight: 200)
+        }
+    }
+
+    @ViewBuilder
+    private var emptyNotes: some View {
+        if streaming != nil || app.processingStage[meeting.id] != nil {
+            EmptyStateView(
+                title: "Working on it…",
+                message: app.processingStage[meeting.id] ?? "Writing your notes…")
+        } else {
+            EmptyStateView(
+                title: emptyNotesTitle,
+                message: emptyNotesMessage,
+                actionTitle: emptyNotesActionTitle,
+                actionIcon: emptyNotesActionIcon,
+                action: emptyNotesAction,
+                secondaryActionTitle: emptyNotesSecondaryActionTitle,
+                secondaryAction: emptyNotesSecondaryAction,
+                tips: emptyNotesTips)
+        }
+    }
+
+    private var notesEditMenu: some View {
+        Menu {
+            Button {
+                notesDraft = app.store.summary(for: meeting.id)
+            } label: {
+                Label("Edit notes", systemImage: "pencil")
+            }
+            .disabled(summary.isEmpty || streaming != nil)
+
+            Menu("Regenerate") {
+                ForEach(app.templates.list()) { template in
+                    Button(template.name) {
+                        Task {
+                            await app.regenerateSummary(
+                                meetingID: meeting.id, templateName: template.name)
+                        }
+                    }
+                }
+                Divider()
+                Button("With current template") {
+                    Task { await app.regenerateSummary(meetingID: meeting.id) }
                 }
             }
+        } label: {
+            Image(systemName: "ellipsis")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(Theme.tertiary(scheme))
+                .frame(width: 28, height: 28)
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+    }
 
-            if let notice = meeting.notice {
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    Label(notice, systemImage: "exclamationmark.triangle")
-                        .font(.parfait(12))
-                        .foregroundStyle(.orange)
+    @ViewBuilder
+    private var noticeBanner: some View {
+        if let notice = meeting.notice, !emptyNotesHandlesNotice {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Label(notice, systemImage: "exclamationmark.triangle")
+                    .font(.parfait(12))
+                    .foregroundStyle(.orange)
+                Spacer(minLength: 8)
+                if canContinueRecording {
+                    Button("Resume recording") {
+                        Task { await app.continueRecording(meetingID: meeting.id) }
+                    }
+                    .controlSize(.small)
+                } else {
                     Button(meeting.state == .failed ? "Retry" : "Regenerate") {
                         Task { await app.retry(meetingID: meeting.id) }
                     }
                     .controlSize(.small)
                 }
-                .padding(10)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(.orange.opacity(0.09), in: RoundedRectangle(cornerRadius: 8))
             }
-
-            if case .done(let url) = publishState {
-                HStack(spacing: 8) {
-                    Label("Published", systemImage: "checkmark.circle.fill")
-                        .font(.parfait(12, .medium))
-                        .foregroundStyle(Theme.mint)
-                    Link(url.absoluteString, destination: url)
-                        .font(.parfait(12))
-                        .lineLimit(1)
-                    Button("Copy") {
-                        NSPasteboard.general.clearContents()
-                        NSPasteboard.general.setString(url.absoluteString, forType: .string)
-                    }
-                    .controlSize(.small)
-                }
-            } else if case .failed(let why) = publishState {
-                Label(why, systemImage: "xmark.circle")
-                    .font(.parfait(12))
-                    .foregroundStyle(.orange)
-            }
-
-            Picker("", selection: $tab) {
-                ForEach(Tab.allCases, id: \.self) { Text($0.rawValue) }
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .frame(maxWidth: 340, alignment: .leading)
-            .padding(.top, 6)
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(.orange.opacity(0.09), in: RoundedRectangle(cornerRadius: 10))
+        } else if case .failed(let why) = publishState {
+            Label(why, systemImage: "xmark.circle")
+                .font(.parfait(12))
+                .foregroundStyle(.orange)
         }
+    }
+
+    // MARK: - Helpers
+
+    private var attendeeChipLabel: String {
+        meeting.attendees.count == 1 ? "1 person" : "\(meeting.attendees.count) people"
+    }
+
+    /// Empty-state block already shows the notice and primary action — skip the banner.
+    private var emptyNotesHandlesNotice: Bool {
+        !isRecordingThisMeeting
+            && !isPrepMeeting
+            && displayed.isEmpty
+            && streaming == nil
+            && app.processingStage[meeting.id] == nil
+            && meeting.notice != nil
+    }
+
+    private var emptyNotesTitle: String {
+        if isEmptyTranscriptNotice { return "No speech captured" }
+        if meeting.notice != nil { return "Couldn't generate notes" }
+        return "No notes yet"
+    }
+
+    private var isEmptyTranscriptNotice: Bool {
+        guard let notice = meeting.notice else { return false }
+        return notice.localizedCaseInsensitiveContains("empty")
+            || notice.localizedCaseInsensitiveContains("nothing to summarize")
+            || notice.localizedCaseInsensitiveContains("no audio could be transcribed")
+    }
+
+    private var emptyNotesMessage: String {
+        if isEmptyTranscriptNotice {
+            if meeting.duration > 0 {
+                let duration = TemplateRenderer.duration(meeting.duration)
+                if hasSideNotes {
+                    return "Parfait recorded \(duration) but didn't detect speech. Your notes are in My notes — resume recording if the call is still going."
+                }
+                return "Parfait recorded \(duration) but didn't detect speech. Resume if the meeting is still live, or write notes manually."
+            }
+            if hasSideNotes {
+                return "Nothing was transcribed, but you have notes in My notes. Resume recording if the call is still going."
+            }
+            return "Nothing was transcribed from this recording. Resume if the meeting is still live, or write notes manually."
+        }
+        if let notice = meeting.notice { return notice }
+        return "Notes appear here once transcription finishes."
+    }
+
+    private var emptyNotesTips: [String] {
+        guard isEmptyTranscriptNotice else { return [] }
+        var tips: [String] = []
+        if showProminentJoinButton, let join = joinConference {
+            tips.append("Join \(join.label.replacingOccurrences(of: "Join ", with: "")) and resume recording to capture the call.")
+        }
+        if !hasSideNotes {
+            tips.append("Use My notes to jot down what happened — they stay with this meeting.")
+        }
+        if meeting.displaySourceApp != nil {
+            tips.append("Make sure Parfait has microphone and system audio access in Settings.")
+        }
+        return Array(tips.prefix(2))
+    }
+
+    private var emptyNotesActionTitle: String? {
+        if canContinueRecording { return "Resume recording" }
+        if meeting.state == .failed { return "Retry" }
+        return nil
+    }
+
+    private var emptyNotesActionIcon: String? {
+        emptyNotesActionTitle == "Resume recording" ? "mic.fill" : nil
+    }
+
+    private var emptyNotesSecondaryActionTitle: String? {
+        if isEmptyTranscriptNotice {
+            return showSideNotes ? nil : "Write notes"
+        }
+        if displayed.isEmpty, app.store.transcript(for: meeting.id).isEmpty {
+            return "View transcript"
+        }
+        return nil
+    }
+
+    private var emptyNotesSecondaryAction: (() -> Void)? {
+        if isEmptyTranscriptNotice, !showSideNotes {
+            return { showSideNotes = true }
+        }
+        if displayed.isEmpty, app.store.transcript(for: meeting.id).isEmpty {
+            return { panelMode = .transcript }
+        }
+        return nil
+    }
+
+    private func presentTranscriptIfNeeded() {
+        guard panelMode == nil else { return }
+        guard emptyNotesHandlesNotice, isEmptyTranscriptNotice else { return }
+        guard app.store.transcript(for: meeting.id).isEmpty else { return }
+        panelMode = .transcript
+    }
+
+    private var emptyNotesAction: (() -> Void)? {
+        if canContinueRecording {
+            return { Task { await app.continueRecording(meetingID: meeting.id) } }
+        }
+        if meeting.state == .failed {
+            return { Task { await app.retry(meetingID: meeting.id) } }
+        }
+        return nil
+    }
+
+    private var canContinueRecording: Bool {
+        meeting.canContinueRecording(isRecording: app.isRecording)
+    }
+
+    private var eventHasEnded: Bool {
+        if let end = meeting.calendarEventEnd ?? linkedCalendarEvent?.end {
+            return end < .now
+        }
+        return meeting.duration > 0 && (meeting.state == .ready || meeting.state == .failed)
+    }
+
+    private var showProminentJoinButton: Bool {
+        joinConference != nil && !eventHasEnded
+    }
+
+    private var linkedCalendarEvent: CalendarEventSummary? {
+        guard let id = meeting.calendarEventID else { return nil }
+        return app.calendar.event(id: id, start: meeting.calendarEventStart)
+    }
+
+    private var joinConference: (label: String, url: URL)? {
+        guard let event = linkedCalendarEvent,
+              let url = event.conferenceURL else { return nil }
+        let peers = app.calendar.agenda.flatMap(\.events)
+        guard event.shouldShowJoinButton(among: peers) else { return nil }
+        return (event.joinLabel, url)
     }
 
     private var publishMenu: some View {
@@ -147,6 +651,7 @@ struct MeetingDetailView: View {
                 Button("Publish to secret Gist (needs gh)") {}
                     .disabled(true)
             }
+            Button("Copy notes") { copyNotes() }
             Button("Preview in browser") { previewInBrowser() }
             if let existing = meeting.publishedURL, let url = URL(string: existing) {
                 Divider()
@@ -154,39 +659,30 @@ struct MeetingDetailView: View {
             }
             Divider()
             Button("Export HTML…") { exportHTML() }
+            FolderPickerMenu(
+                currentFolderID: meeting.folderID,
+                calendarTitle: meeting.calendarEventTitle ?? meeting.title,
+                meetingID: meeting.id
+            ) {
+                Text("Move to folder…")
+            }
             Button("Show files in Finder") {
                 NSWorkspace.shared.activateFileViewerSelecting(
                     [app.store.archive.folder(for: meeting.id)])
             }
             Divider()
-            Button("Delete meeting…", role: .destructive) { showDeleteConfirm = true }
+            Button("Move to trash", role: .destructive) { showDeleteConfirm = true }
         } label: {
             if publishState == .working {
                 ProgressView().controlSize(.small)
             } else {
-                Label("Share", systemImage: "square.and.arrow.up")
-                    .font(.parfait(13, .medium))
+                Image(systemName: "ellipsis.circle")
+                    .font(.system(size: 15))
+                    .foregroundStyle(Theme.secondary(scheme))
             }
         }
         .menuStyle(.borderlessButton)
         .fixedSize()
-        .confirmationDialog("Delete “\(meeting.title)”?", isPresented: $showDeleteConfirm) {
-            Button("Delete", role: .destructive) { app.store.delete(id: meeting.id) }
-        } message: {
-            Text("This permanently removes the audio, transcript, and notes from your Mac.")
-        }
-    }
-
-    @ViewBuilder
-    private var content: some View {
-        switch tab {
-        case .notes:
-            NotesTab(meeting: meeting, draft: $notesDraft)
-        case .transcript:
-            TranscriptTab(meeting: meeting, draft: $transcriptDraft)
-        case .ask:
-            MeetingLauncherView(meeting: meeting)
-        }
     }
 
     private func saveTitle() {
@@ -195,6 +691,13 @@ struct MeetingDetailView: View {
         var m = meeting
         m.title = t
         app.store.upsert(m)
+    }
+
+    private func copyNotes() {
+        let text = app.store.summary(for: meeting.id)
+        guard !text.isEmpty else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
     }
 
     private func publish() {
@@ -209,8 +712,6 @@ struct MeetingDetailView: View {
                     html: html,
                     filename: "meeting.html",
                     description: "Parfait meeting notes — \(m.title)")
-                // Re-fetch: the upload took a while and the meeting may have been
-                // edited (merge) or deleted (then don't resurrect it) meanwhile.
                 if var fresh = app.store.meeting(id: m.id) {
                     fresh.publishedURL = rendered.absoluteString
                     app.store.upsert(fresh)
@@ -224,9 +725,6 @@ struct MeetingDetailView: View {
         }
     }
 
-    /// No dependencies: render the page to a temp file and open it in the default
-    /// browser. Nothing is uploaded — the honest way to see the styled page (and
-    /// share the file) without gh.
     private func previewInBrowser() {
         let html = HTMLExporter.html(
             meeting: meeting,

@@ -56,3 +56,43 @@ logic (store, labeling, formatting, templates, MCP, HTML export, CLI args).
 ## Resilience
 - [ ] Quit the app mid-recording, relaunch → orphaned meeting finalizes into a normal one
 - [ ] Deny mic but grant system audio → recording still works, notice explains the gap
+
+## Folders
+
+### Create & organize
+- [ ] Sidebar shows Folders section with "New folder"
+- [ ] Create folder → appears in sidebar; empty folder page
+- [ ] Assign meeting to folder via detail chip → meeting leaves flat Meetings list
+- [ ] Folder page lists assigned meetings, newest first
+
+### Move to… menu
+- [ ] Sidebar meeting row → Move to… → pick folder → meeting moves
+- [ ] Folder page row → Move to… → different folder → meeting moves
+- [ ] Remove from folder → meeting appears in flat Meetings list
+- [ ] New folder… from menu creates folder and assigns in one step
+- [ ] Meeting detail overflow → Move to folder… works the same
+
+### Drag-and-drop
+- [ ] Drag meeting from Meetings list onto folder row → assigns; row leaves Meetings
+- [ ] Drag meeting from folder page onto another folder → reassigns
+- [ ] Drag onto Meetings section header → Remove from folder
+- [ ] Folder row highlights on drag-over; no drop on current folder
+- [ ] Recording meeting is not draggable
+
+### Calendar auto-file
+- [ ] Record a calendar-titled standup → assign to folder manually
+- [ ] Record next week's same-titled standup → auto-lands in that folder
+- [ ] Standup with different title → stays unfiled until assigned
+
+### Coming up
+- [ ] Click upcoming event → opens prep view with side notes panel
+- [ ] Write side notes before meeting → saved and visible on return
+- [ ] "Start now" in floating panel begins recording
+- [ ] "Add to folder" on agenda row creates rule without recording
+- [ ] Row shows folder badge when rule exists
+- [ ] Record that event → notes appear in folder
+
+### Delete & edge cases
+- [ ] Delete folder → meetings become unfiled; rules removed
+- [ ] Rename folder → meetings stay linked; rules unchanged
+- [ ] Meeting without calendar title → manual assign only; no rule unless title present

@@ -1,5 +1,6 @@
-// Generates the Parfait app icon (all AppIcon.iconset sizes + 1024 master)
-// and menu-bar template icons. Run: swift scripts/MakeIcon.swift <outdir>
+// Generates the Parfait app icon (all AppIcon.iconset sizes + 1024 master),
+// nav-bar template icons, and site PNGs from Resources/AppIcon.svg.
+// Run: swift scripts/MakeIcon.swift <outdir> [siteDir]
 import Foundation
 import CoreGraphics
 import ImageIO
@@ -11,14 +12,40 @@ func srgb(_ r: Int, _ g: Int, _ b: Int, _ a: CGFloat = 1) -> CGColor {
     CGColor(srgbRed: CGFloat(r) / 255, green: CGFloat(g) / 255, blue: CGFloat(b) / 255, alpha: a)
 }
 
-let bgTop = srgb(255, 251, 246)
-let bgBottom = srgb(252, 238, 220)
-let glassTone = srgb(233, 213, 184)
-let raspberry = srgb(224, 57, 107)
-let honey = srgb(242, 169, 59)
-let creamLayer = srgb(255, 253, 248)
-let leafGreen = srgb(63, 178, 127)
-let shadowTone = srgb(139, 98, 55, 0.28)
+let appDesignSize: CGFloat = 321
+let appBackgroundTop = srgb(154, 162, 255)    // #9AA2FF
+let appBackgroundBottom = srgb(94, 107, 255)  // #5E6BFF at offset 0.674037
+let appStripeLeft: CGFloat = 67
+let appStripeRight: CGFloat = 253.214
+
+/// Nav-bar glyph uses Resources/NavIcon.svg artboard (44×56), not AppIcon.svg.
+let menuDesignW: CGFloat = 44
+let menuDesignH: CGFloat = 56
+let menuStripeLeft: CGFloat = 4
+let menuStripeRight: CGFloat = 40
+
+let stripeColors = [
+    srgb(255, 249, 242), // cream
+    srgb(242, 169, 59),  // honey
+    srgb(224, 57, 107),  // raspberry
+    srgb(90, 106, 207),  // blueberry
+]
+
+/// Stripe bands from Resources/AppIcon.svg (equal-height layers inside the cup).
+let appStripeBands: [(CGFloat, CGFloat)] = [
+    (42, 101.25),
+    (101.25, 160.5),
+    (160.5, 219.75),
+    (219.75, 279),
+]
+
+/// Stripe bands from Resources/NavIcon.svg.
+let menuStripeBands: [(CGFloat, CGFloat)] = [
+    (8, 15),
+    (18, 25),
+    (28, 35),
+    (38, 46),
+]
 
 func makeContext(_ px: Int) -> CGContext {
     let ctx = CGContext(
@@ -36,122 +63,178 @@ func writePNG(_ ctx: CGContext, to url: URL) {
     guard CGImageDestinationFinalize(dest) else { fputs("cannot write \(url.path)\n", stderr); exit(1) }
 }
 
-/// Tapered cup: flat rim at topY, rounded bottom corners. Works in any coordinate scale.
-func cupPath(cx: CGFloat, topY: CGFloat, botY: CGFloat, topHalf: CGFloat, botHalf: CGFloat, r: CGFloat) -> CGPath {
+/// Cup mask from Resources/AppIcon.svg (clips the stripe fills).
+func parfaitIconCupPath() -> CGPath {
     let p = CGMutablePath()
-    let tl = CGPoint(x: cx - topHalf, y: topY)
-    let bl = CGPoint(x: cx - botHalf, y: botY)
-    let br = CGPoint(x: cx + botHalf, y: botY)
-    let tr = CGPoint(x: cx + topHalf, y: topY)
-    p.move(to: tl)
-    p.addArc(tangent1End: bl, tangent2End: br, radius: r)
-    p.addArc(tangent1End: br, tangent2End: tr, radius: r)
-    p.addLine(to: tr)
+    p.move(to: CGPoint(x: 100.857, y: 42))
+    p.addLine(to: CGPoint(x: 219.357, y: 42))
+    p.addCurve(to: CGPoint(x: 243.298, y: 51.9165),
+               control1: CGPoint(x: 228.337, y: 42), control2: CGPoint(x: 236.948, y: 45.5671))
+    p.addCurve(to: CGPoint(x: 253.214, y: 75.8571),
+               control1: CGPoint(x: 249.647, y: 58.266), control2: CGPoint(x: 253.214, y: 66.8777))
+    p.addLine(to: CGPoint(x: 253.214, y: 202.821))
+    p.addCurve(to: CGPoint(x: 230.902, y: 256.688),
+               control1: CGPoint(x: 253.214, y: 223.025), control2: CGPoint(x: 245.188, y: 242.402))
+    p.addCurve(to: CGPoint(x: 177.036, y: 279),
+               control1: CGPoint(x: 216.616, y: 270.974), control2: CGPoint(x: 197.24, y: 279))
+    p.addLine(to: CGPoint(x: 143.179, y: 279))
+    p.addCurve(to: CGPoint(x: 89.3122, y: 256.688),
+               control1: CGPoint(x: 122.975, y: 279), control2: CGPoint(x: 103.598, y: 270.974))
+    p.addCurve(to: CGPoint(x: 67, y: 202.821),
+               control1: CGPoint(x: 75.0259, y: 242.402), control2: CGPoint(x: 67, y: 223.025))
+    p.addLine(to: CGPoint(x: 67, y: 75.8571))
+    p.addCurve(to: CGPoint(x: 76.9165, y: 51.9165),
+               control1: CGPoint(x: 67, y: 66.8777), control2: CGPoint(x: 70.5671, y: 58.266))
+    p.addCurve(to: CGPoint(x: 100.857, y: 42),
+               control1: CGPoint(x: 83.266, y: 45.5671), control2: CGPoint(x: 91.8777, y: 42))
     p.closeSubpath()
     return p
 }
 
-// MARK: - App icon (drawn in 1024-space, vector-scaled to each pixel size)
+/// Stroke outline from Resources/AppIcon.svg (separate path, stroke-width 4).
+func parfaitIconStrokePath() -> CGPath {
+    let p = CGMutablePath()
+    p.move(to: CGPoint(x: 219.357, y: 40))
+    p.addCurve(to: CGPoint(x: 244.712, y: 50.502),
+               control1: CGPoint(x: 228.867, y: 40.0001), control2: CGPoint(x: 237.987, y: 43.7776))
+    p.addCurve(to: CGPoint(x: 255.214, y: 75.8574),
+               control1: CGPoint(x: 251.436, y: 57.2265), control2: CGPoint(x: 255.214, y: 66.3475))
+    p.addLine(to: CGPoint(x: 255.214, y: 202.821))
+    p.addCurve(to: CGPoint(x: 232.316, y: 258.102),
+               control1: CGPoint(x: 255.214, y: 223.555), control2: CGPoint(x: 246.978, y: 243.44))
+    p.addCurve(to: CGPoint(x: 177.036, y: 281),
+               control1: CGPoint(x: 217.655, y: 272.763), control2: CGPoint(x: 197.77, y: 281))
+    p.addLine(to: CGPoint(x: 143.179, y: 281))
+    p.addCurve(to: CGPoint(x: 87.8984, y: 258.102),
+               control1: CGPoint(x: 122.444, y: 281), control2: CGPoint(x: 102.56, y: 272.763))
+    p.addCurve(to: CGPoint(x: 65, y: 202.821),
+               control1: CGPoint(x: 73.2371, y: 243.44), control2: CGPoint(x: 65, y: 223.556))
+    p.addLine(to: CGPoint(x: 65, y: 75.8574))
+    p.addLine(to: CGPoint(x: 65.0107, y: 74.9668))
+    p.addCurve(to: CGPoint(x: 75.502, y: 50.502),
+               control1: CGPoint(x: 65.2387, y: 65.7796), control2: CGPoint(x: 68.9876, y: 57.0163))
+    p.addCurve(to: CGPoint(x: 100.857, y: 40),
+               control1: CGPoint(x: 82.2265, y: 43.7774), control2: CGPoint(x: 91.3475, y: 40))
+    p.addLine(to: CGPoint(x: 219.357, y: 40))
+    p.closeSubpath()
+    return p
+}
+
+/// Cup silhouette from Resources/NavIcon.svg (44×56).
+func parfaitMenuCupPath() -> CGPath {
+    let p = CGMutablePath()
+    p.move(to: CGPoint(x: 10.5455, y: 8))
+    p.addLine(to: CGPoint(x: 33.4545, y: 8))
+    p.addCurve(to: CGPoint(x: 38.0829, y: 9.58999),
+               control1: CGPoint(x: 35.1905, y: 8), control2: CGPoint(x: 36.8554, y: 8.57194))
+    p.addCurve(to: CGPoint(x: 40, y: 13.4286),
+               control1: CGPoint(x: 39.3104, y: 10.608), control2: CGPoint(x: 40, y: 11.9888))
+    p.addLine(to: CGPoint(x: 40, y: 33.7857))
+    p.addCurve(to: CGPoint(x: 35.6865, y: 42.4225),
+               control1: CGPoint(x: 40, y: 37.0251), control2: CGPoint(x: 38.4484, y: 40.1319))
+    p.addCurve(to: CGPoint(x: 25.2727, y: 46),
+               control1: CGPoint(x: 32.9246, y: 44.7131), control2: CGPoint(x: 29.1786, y: 46))
+    p.addLine(to: CGPoint(x: 18.7273, y: 46))
+    p.addCurve(to: CGPoint(x: 8.31352, y: 42.4225),
+               control1: CGPoint(x: 14.8214, y: 46), control2: CGPoint(x: 11.0754, y: 44.7131))
+    p.addCurve(to: CGPoint(x: 4, y: 33.7857),
+               control1: CGPoint(x: 5.55162, y: 40.1319), control2: CGPoint(x: 4, y: 37.0251))
+    p.addLine(to: CGPoint(x: 4, y: 13.4286))
+    p.addCurve(to: CGPoint(x: 5.91712, y: 9.58999),
+               control1: CGPoint(x: 4, y: 11.9888), control2: CGPoint(x: 4.68961, y: 10.608))
+    p.addCurve(to: CGPoint(x: 10.5455, y: 8),
+               control1: CGPoint(x: 7.14463, y: 8.57194), control2: CGPoint(x: 8.80949, y: 8))
+    p.closeSubpath()
+    return p
+}
 
 func drawAppIcon(in ctx: CGContext, px: Int) {
+    let scale = CGFloat(px) / appDesignSize
+
+    // Background gradient from AppIcon.svg paint0_linear_6_14.
+    let grad = CGGradient(
+        colorsSpace: space,
+        colors: [appBackgroundTop, appBackgroundBottom] as CFArray,
+        locations: [0, 0.674037])!
+    let bgX = 160 * scale
+    ctx.drawLinearGradient(
+        grad,
+        start: CGPoint(x: bgX, y: CGFloat(px)),
+        end: CGPoint(x: bgX, y: CGFloat(px) * (1 - 328.5 / appDesignSize)),
+        options: [])
+
     ctx.saveGState()
-    let s = CGFloat(px) / 1024
-    ctx.scaleBy(x: s, y: s)
+    ctx.translateBy(x: 0, y: CGFloat(px))
+    ctx.scaleBy(x: scale, y: -scale)
 
-    // Rounded-rect plate with standard macOS icon margins; everything clips to it.
-    let plate = CGPath(
-        roundedRect: CGRect(x: 100, y: 100, width: 824, height: 824),
-        cornerWidth: 186, cornerHeight: 186, transform: nil)
-    ctx.addPath(plate)
-    ctx.clip()
-    let grad = CGGradient(colorsSpace: space, colors: [bgBottom, bgTop] as CFArray, locations: [0, 1])!
-    ctx.drawLinearGradient(grad, start: CGPoint(x: 512, y: 100), end: CGPoint(x: 512, y: 924), options: [])
-
-    // Soft elliptical shadow under the foot.
-    ctx.saveGState()
-    ctx.translateBy(x: 512, y: 196)
-    ctx.scaleBy(x: 1, y: 0.14)
-    let sg = CGGradient(colorsSpace: space, colors: [shadowTone, srgb(139, 98, 55, 0)] as CFArray, locations: [0, 1])!
-    ctx.drawRadialGradient(sg, startCenter: .zero, startRadius: 0, endCenter: .zero, endRadius: 205, options: [])
-    ctx.restoreGState()
-
-    // Glass body: cup + stem + foot as one flat sand-toned shape.
-    let cup = cupPath(cx: 512, topY: 753, botY: 286, topHalf: 206, botHalf: 132, r: 44)
-    let stem = CGPath(rect: CGRect(x: 486, y: 214, width: 52, height: 100), transform: nil)
-    let foot = CGPath(
-        roundedRect: CGRect(x: 380, y: 190, width: 264, height: 34),
-        cornerWidth: 17, cornerHeight: 17, transform: nil)
-    ctx.setFillColor(glassTone)
+    let cup = parfaitIconCupPath()
     ctx.addPath(cup)
-    ctx.addPath(stem)
-    ctx.addPath(foot)
-    ctx.fillPath()
-
-    // Interior inset leaves a visible glass wall + rim lip; three flat layers inside.
-    let interior = cupPath(cx: 512, topY: 737, botY: 302, topHalf: 188, botHalf: 115, r: 32)
-    ctx.saveGState()
-    ctx.addPath(interior)
     ctx.clip()
-    ctx.setFillColor(raspberry)
-    ctx.fill(CGRect(x: 300, y: 302, width: 424, height: 176))
-    ctx.setFillColor(honey)
-    ctx.fill(CGRect(x: 300, y: 478, width: 424, height: 130))
-    ctx.setFillColor(creamLayer)
-    ctx.fill(CGRect(x: 300, y: 608, width: 424, height: 129))
-    ctx.restoreGState()
 
-    // Berry with a small highlight, plus a pointed leaf angled off its shoulder.
-    ctx.setFillColor(raspberry)
-    ctx.fillEllipse(in: CGRect(x: 512 - 56, y: 781 - 56, width: 112, height: 112))
-    ctx.setFillColor(srgb(255, 255, 255, 0.5))
-    ctx.fillEllipse(in: CGRect(x: 481, y: 793, width: 26, height: 26))
+    for (i, band) in appStripeBands.enumerated() {
+        ctx.setFillColor(stripeColors[i])
+        ctx.fill(CGRect(x: appStripeLeft, y: band.0, width: appStripeRight - appStripeLeft, height: band.1 - band.0))
+    }
+    ctx.restoreGState()
 
     ctx.saveGState()
-    ctx.translateBy(x: 584, y: 843)
-    ctx.rotate(by: .pi * 32 / 180)
-    let leaf = CGMutablePath()
-    leaf.move(to: CGPoint(x: -34, y: 0))
-    leaf.addQuadCurve(to: CGPoint(x: 34, y: 0), control: CGPoint(x: 0, y: 26))
-    leaf.addQuadCurve(to: CGPoint(x: -34, y: 0), control: CGPoint(x: 0, y: -26))
-    ctx.setFillColor(leafGreen)
-    ctx.addPath(leaf)
-    ctx.fillPath()
-    ctx.restoreGState()
-
+    ctx.translateBy(x: 0, y: CGFloat(px))
+    ctx.scaleBy(x: scale, y: -scale)
+    ctx.setStrokeColor(srgb(67, 50, 43, 0.12))
+    ctx.setLineWidth(4)
+    ctx.addPath(parfaitIconStrokePath())
+    ctx.strokePath()
     ctx.restoreGState()
 }
 
-// MARK: - Menu bar template glyph (18-space; heavier strokes so 18px stays readable)
-
 func drawMenuGlyph(in ctx: CGContext, px: Int) {
+    let scale = CGFloat(px) / menuDesignH
+    let renderW = menuDesignW * scale
+    let offsetX = (CGFloat(px) - renderW) / 2
+
     ctx.saveGState()
-    let s = CGFloat(px) / 18
-    ctx.scaleBy(x: s, y: s)
-    // Stronger taper + berry floating just above the rim so the solid
-    // silhouette reads as a dessert glass, not a trophy.
-    let p = CGMutablePath()
-    p.addPath(cupPath(cx: 9, topY: 12.8, botY: 5.8, topHalf: 5.5, botHalf: 2.9, r: 1.2))
-    p.addPath(CGPath(rect: CGRect(x: 8.25, y: 2.4, width: 1.5, height: 3.6), transform: nil))
-    p.addPath(CGPath(
-        roundedRect: CGRect(x: 5.0, y: 1.2, width: 8.0, height: 1.4),
-        cornerWidth: 0.7, cornerHeight: 0.7, transform: nil))
-    p.addEllipse(in: CGRect(x: 9 - 1.7, y: 15.0 - 1.7, width: 3.4, height: 3.4))
+    ctx.translateBy(x: offsetX, y: CGFloat(px))
+    ctx.scaleBy(x: scale, y: -scale)
+
+    let cup = parfaitMenuCupPath()
+    ctx.addPath(cup)
+    ctx.clip()
+
     ctx.setFillColor(srgb(0, 0, 0))
-    ctx.addPath(p)
-    ctx.fillPath()
+    for band in menuStripeBands {
+        ctx.fill(CGRect(x: menuStripeLeft, y: band.0, width: menuStripeRight - menuStripeLeft, height: band.1 - band.0))
+    }
     ctx.restoreGState()
 }
 
 // MARK: - Driver
 
+enum IconMode: String {
+    case all, app, menu
+}
+
 let args = CommandLine.arguments
-guard args.count == 2 else {
-    fputs("usage: swift MakeIcon.swift <outdir>\n", stderr)
+guard args.count >= 2 else {
+    fputs("usage: swift MakeIcon.swift <outdir> [siteDir] [app|menu|all]\n", stderr)
     exit(1)
 }
+
 let outDir = URL(fileURLWithPath: args[1], isDirectory: true)
+var siteDir: URL?
+var mode: IconMode = .all
+
+for arg in args.dropFirst(2) {
+    if let parsed = IconMode(rawValue: arg) {
+        mode = parsed
+    } else if siteDir == nil {
+        siteDir = URL(fileURLWithPath: arg, isDirectory: true)
+    } else {
+        fputs("usage: swift MakeIcon.swift <outdir> [siteDir] [app|menu|all]\n", stderr)
+        exit(1)
+    }
+}
+
 let iconset = outDir.appendingPathComponent("AppIcon.iconset", isDirectory: true)
-try FileManager.default.createDirectory(at: iconset, withIntermediateDirectories: true)
 
 func renderAppIcon(_ px: Int, to url: URL) {
     let ctx = makeContext(px)
@@ -165,22 +248,35 @@ func renderMenuGlyph(_ px: Int, to url: URL) {
     writePNG(ctx, to: url)
 }
 
-// iconutil requires exactly these names; each rendered from vectors at its own size.
-let iconsetEntries: [(String, Int)] = [
-    ("icon_16x16.png", 16), ("icon_16x16@2x.png", 32),
-    ("icon_32x32.png", 32), ("icon_32x32@2x.png", 64),
-    ("icon_128x128.png", 128), ("icon_128x128@2x.png", 256),
-    ("icon_256x256.png", 256), ("icon_256x256@2x.png", 512),
-    ("icon_512x512.png", 512), ("icon_512x512@2x.png", 1024),
-]
-for (name, px) in iconsetEntries {
-    renderAppIcon(px, to: iconset.appendingPathComponent(name))
+if mode == .all || mode == .app {
+    try FileManager.default.createDirectory(at: iconset, withIntermediateDirectories: true)
+
+    let iconsetEntries: [(String, Int)] = [
+        ("icon_16x16.png", 16), ("icon_16x16@2x.png", 32),
+        ("icon_32x32.png", 32), ("icon_32x32@2x.png", 64),
+        ("icon_128x128.png", 128), ("icon_128x128@2x.png", 256),
+        ("icon_256x256.png", 256), ("icon_256x256@2x.png", 512),
+        ("icon_512x512.png", 512), ("icon_512x512@2x.png", 1024),
+    ]
+    for (name, px) in iconsetEntries {
+        renderAppIcon(px, to: iconset.appendingPathComponent(name))
+    }
+    renderAppIcon(1024, to: outDir.appendingPathComponent("AppIcon-1024.png"))
+
+    if let siteDir {
+        try FileManager.default.createDirectory(at: siteDir, withIntermediateDirectories: true)
+        renderAppIcon(256, to: siteDir.appendingPathComponent("icon.png"))
+        renderAppIcon(32, to: siteDir.appendingPathComponent("favicon.png"))
+    }
 }
-renderAppIcon(1024, to: outDir.appendingPathComponent("AppIcon-1024.png"))
 
-renderMenuGlyph(18, to: outDir.appendingPathComponent("MenuBarIcon.png"))
-renderMenuGlyph(36, to: outDir.appendingPathComponent("MenuBarIcon@2x.png"))
-// Oversized render for design review only; not shipped.
-renderMenuGlyph(288, to: outDir.appendingPathComponent("MenuBarIcon-preview.png"))
+if mode == .all || mode == .menu {
+    renderMenuGlyph(18, to: outDir.appendingPathComponent("NavIcon.png"))
+    renderMenuGlyph(36, to: outDir.appendingPathComponent("NavIcon@2x.png"))
+    renderMenuGlyph(288, to: outDir.appendingPathComponent("NavIcon-preview.png"))
+}
 
-print("wrote icons to \(outDir.path)")
+print("wrote \(mode.rawValue) icons to \(outDir.path)")
+if let siteDir, mode == .all || mode == .app {
+    print("wrote site icons to \(siteDir.path)")
+}

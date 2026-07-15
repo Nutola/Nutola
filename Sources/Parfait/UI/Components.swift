@@ -1,11 +1,97 @@
+import AppKit
 import SwiftUI
 
+extension View {
+    /// SwiftUI `Menu` on macOS ignores `role: .destructive`; tint the backing `NSMenuItem` red.
+    func destructiveMenuItemStyle() -> some View {
+        background(DestructiveMenuItemStyle())
+    }
+}
+
+private struct DestructiveMenuItemStyle: NSViewRepresentable {
+    func makeNSView(context: Context) -> DestructiveMenuItemStyleView {
+        DestructiveMenuItemStyleView()
+    }
+
+    func updateNSView(_ nsView: DestructiveMenuItemStyleView, context: Context) {
+        nsView.applyStyle()
+    }
+}
+
+private final class DestructiveMenuItemStyleView: NSView {
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        applyStyle()
+    }
+
+    func applyStyle() {
+        guard let item = enclosingMenuItem else { return }
+        let title = item.title
+        guard !title.isEmpty else { return }
+        item.attributedTitle = NSAttributedString(
+            string: title,
+            attributes: [.foregroundColor: NSColor.systemRed]
+        )
+    }
+}
+
+struct ConferenceVideoIcon: View {
+    @Environment(\.colorScheme) private var scheme
+
+    var body: some View {
+        Image(systemName: "video.fill")
+            .font(.system(size: 10, weight: .semibold))
+            .foregroundStyle(Theme.blueberry(scheme))
+    }
+}
+
+struct ConferenceJoinButton: View {
+    @Environment(\.colorScheme) private var scheme
+    let label: String
+    let url: URL
+    var prominent: Bool = false
+
+    var body: some View {
+        Group {
+            if prominent {
+                Button {
+                    ConferenceJoiner.open(url)
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: "video.fill")
+                            .font(.system(size: 14, weight: .semibold))
+                        Text(label)
+                            .font(.parfait(14, .semibold))
+                    }
+                    .foregroundStyle(Color.white)
+                    .padding(.horizontal, 18)
+                    .padding(.vertical, 10)
+                    .frame(maxWidth: .infinity)
+                    .background(Theme.blueberry(scheme), in: Capsule())
+                }
+                .buttonStyle(.plain)
+            } else {
+                Button {
+                    ConferenceJoiner.open(url)
+                } label: {
+                    Label(label, systemImage: "video.fill")
+                        .font(.parfait(11, .medium))
+                }
+                .buttonStyle(.bordered)
+                .tint(Theme.blueberry(scheme))
+                .controlSize(.regular)
+            }
+        }
+    }
+}
+
 struct RecordDot: View {
+    @Environment(\.parfaitActionColor) private var actionColor
     @State private var pulsing = false
 
     var body: some View {
         Circle()
-            .fill(Theme.raspberry)
+            .fill(actionColor)
             .frame(width: 10, height: 10)
             .opacity(pulsing ? 0.35 : 1)
             .animation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true), value: pulsing)
@@ -14,31 +100,82 @@ struct RecordDot: View {
 }
 
 struct LevelMeter: View {
-    /// 0...1
+    /// 0...1 — scales bob amplitude; bars always animate like the marketing site.
     var level: Float
-    private let barCount = 12
 
     var body: some View {
-        HStack(spacing: 3) {
-            ForEach(0..<barCount, id: \.self) { i in
-                RoundedRectangle(cornerRadius: 1.5)
-                    .fill(Float(i) / Float(barCount) < level ? Theme.mint : Color.secondary.opacity(0.2))
-                    .frame(width: 4, height: 4 + CGFloat(i) * 1.2)
+        MeterBars(level: level, delays: Self.delays)
+    }
+
+    private static let delays: [TimeInterval] = [
+        0, 0.09, 0.18, 0.27, 0.36, 0.45, 0.30, 0.15, 0.05, 0.22, 0.12, 0.34,
+    ]
+}
+
+/// Staggered bottom-anchored bars — mirrors `.meter` / `@keyframes bob` on the site.
+struct MeterBars: View {
+    var level: Float
+    var delays: [TimeInterval]
+
+    private let minScale: CGFloat = 0.35
+    private let maxScale: CGFloat = 2.4
+    private let baseHeight: CGFloat = 5
+    private let containerHeight: CGFloat = 16
+
+    var body: some View {
+        HStack(alignment: .bottom, spacing: 3) {
+            ForEach(Array(delays.enumerated()), id: \.offset) { _, delay in
+                BobbingMeterBar(
+                    delay: delay,
+                    level: level,
+                    minScale: minScale,
+                    maxScale: maxScale,
+                    baseHeight: baseHeight)
             }
         }
-        .animation(.linear(duration: 0.1), value: level)
+        .frame(height: containerHeight, alignment: .bottom)
+    }
+}
+
+private struct BobbingMeterBar: View {
+    let delay: TimeInterval
+    var level: Float
+    let minScale: CGFloat
+    let maxScale: CGFloat
+    let baseHeight: CGFloat
+
+    @State private var bobbing = false
+
+    private var peakScale: CGFloat {
+        minScale + CGFloat(min(max(level, 0.1), 1)) * (maxScale - minScale)
+    }
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: 2)
+            .fill(Theme.mint)
+            .frame(width: 4, height: baseHeight)
+            .scaleEffect(y: bobbing ? peakScale : minScale, anchor: .bottom)
+            .animation(.linear(duration: 0.1), value: level)
+            .onAppear {
+                withAnimation(.easeInOut(duration: 1.1).repeatForever(autoreverses: true).delay(delay)) {
+                    bobbing = true
+                }
+            }
     }
 }
 
 struct StateBadge: View {
+    @Environment(\.parfaitActionColor) private var actionColor
     let meeting: Meeting
     let stage: String?
 
     var body: some View {
         switch meeting.state {
+        case .prep:
+            EmptyView()
         case .recording:
             Label("Recording", systemImage: "record.circle")
-                .badgeStyle(Theme.raspberry)
+                .badgeStyle(actionColor)
         case .processing:
             HStack(spacing: 4) {
                 ProgressView().controlSize(.mini)
@@ -93,24 +230,58 @@ struct Chip: View {
     }
 }
 
+/// Attendee chips with a compact default — show `limit` items, then "See more".
+struct ExpandableChipFlow: View {
+    @Environment(\.colorScheme) private var scheme
+    let items: [String]
+    var limit: Int = 3
+    @State private var expanded = false
+
+    var body: some View {
+        FlowLayout(spacing: 6) {
+            ForEach(visibleItems, id: \.self) { Chip(text: $0) }
+            if items.count > limit {
+                Button(expanded ? "See less" : "See more") {
+                    expanded.toggle()
+                }
+                .font(.parfait(11, .medium))
+                .foregroundStyle(Theme.blueberry(scheme))
+                .buttonStyle(.plain)
+            }
+        }
+    }
+
+    private var visibleItems: [String] {
+        expanded ? items : Array(items.prefix(limit))
+    }
+}
+
 /// Wraps attendee-style chips onto new rows instead of overflowing the container width.
 struct FlowLayout: Layout {
     var spacing: CGFloat = 6
 
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        guard !subviews.isEmpty else { return .zero }
+
         let maxWidth = proposal.width ?? .infinity
         var x: CGFloat = 0, y: CGFloat = 0, rowHeight: CGFloat = 0
-        for subview in subviews {
+        var usedWidth: CGFloat = 0
+
+        for (index, subview) in subviews.enumerated() {
             let size = subview.sizeThatFits(.unspecified)
             if x + size.width > maxWidth, x > 0 {
+                usedWidth = max(usedWidth, x - spacing)
                 y += rowHeight + spacing
                 x = 0
                 rowHeight = 0
             }
-            x += size.width + spacing
+            x += size.width + (index < subviews.count - 1 ? spacing : 0)
             rowHeight = max(rowHeight, size.height)
         }
-        return CGSize(width: maxWidth.isFinite ? maxWidth : x, height: y + rowHeight)
+
+        usedWidth = max(usedWidth, x)
+        let width = maxWidth.isFinite ? min(maxWidth, usedWidth) : usedWidth
+        return CGSize(width: width, height: y + rowHeight)
     }
 
     func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
@@ -141,6 +312,16 @@ extension View {
     func cardStyle() -> some View {
         modifier(CardBackground())
     }
+
+    /// Full-height calendar color bar on the leading edge of event rows.
+    func calendarEventIndicator(_ color: Color, width: CGFloat = 3, spacing: CGFloat = 8) -> some View {
+        padding(.leading, width + spacing)
+            .overlay(alignment: .leading) {
+                Capsule()
+                    .fill(color)
+                    .frame(width: width)
+            }
+    }
 }
 
 struct CardBackground: ViewModifier {
@@ -150,6 +331,125 @@ struct CardBackground: ViewModifier {
         content
             .padding(14)
             .background(Theme.card(scheme), in: RoundedRectangle(cornerRadius: Theme.cornerRadius))
+    }
+}
+
+// MARK: - Meeting history list
+
+enum MeetingListMetadata {
+    case attendees(String)
+    case duration(String)
+    case source(String)
+
+    var icon: String {
+        switch self {
+        case .attendees: "person.2"
+        case .duration: "clock"
+        case .source: "app.badge"
+        }
+    }
+
+    var text: String {
+        switch self {
+        case .attendees(let text), .duration(let text), .source(let text): text
+        }
+    }
+
+    static func from(_ meeting: Meeting) -> MeetingListMetadata? {
+        if !meeting.attendees.isEmpty {
+            let names = meeting.attendees.prefix(2).joined(separator: ", ")
+            let extra = meeting.attendees.count - 2
+            let text = extra > 0 ? "\(names) & \(extra) others" : names
+            return .attendees(text)
+        }
+        if meeting.duration > 0 {
+            return .duration(TemplateRenderer.duration(meeting.duration))
+        }
+        if let app = meeting.displaySourceApp {
+            return .source(app)
+        }
+        return nil
+    }
+}
+
+private struct MeetingRowButtonStyle: ButtonStyle {
+    @Environment(\.colorScheme) private var scheme
+    var isHovered: Bool
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .padding(.horizontal, 8)
+            .padding(.vertical, 10)
+            .background {
+                RoundedRectangle(cornerRadius: 10)
+                    .fill(isHighlighted(configuration) ? Theme.chip(scheme) : Color.clear)
+            }
+            .contentShape(RoundedRectangle(cornerRadius: 10))
+    }
+
+    private func isHighlighted(_ configuration: Configuration) -> Bool {
+        configuration.isPressed || isHovered
+    }
+}
+
+struct MeetingHistoryRow: View {
+    @Environment(\.colorScheme) private var scheme
+    let meeting: Meeting
+    var stage: String? = nil
+    let action: () -> Void
+
+    @State private var isHovered = false
+
+    private var metadata: MeetingListMetadata? { MeetingListMetadata.from(meeting) }
+
+    var body: some View {
+        Button(action: action) {
+            HStack(alignment: .center, spacing: 12) {
+                VStack(alignment: .leading, spacing: 5) {
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        Text(meeting.title)
+                            .font(.parfait(14, .medium))
+                            .foregroundStyle(Theme.heading(scheme))
+                            .lineLimit(2)
+                            .multilineTextAlignment(.leading)
+                        if meeting.calendarEventID != nil {
+                            Image(systemName: "calendar")
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(Theme.blueberry(scheme))
+                        }
+                    }
+                    if let metadata {
+                        HStack(spacing: 4) {
+                            Image(systemName: metadata.icon)
+                                .font(.system(size: 9, weight: .semibold))
+                            Text(metadata.text)
+                                .font(.parfait(11))
+                                .lineLimit(1)
+                        }
+                        .foregroundStyle(Theme.secondary(scheme))
+                    }
+                }
+
+                Spacer(minLength: 8)
+
+                VStack(alignment: .trailing, spacing: 4) {
+                    Text(meeting.createdAt.formatted(date: .omitted, time: .shortened))
+                        .font(.system(size: 12, weight: .medium, design: .monospaced))
+                        .foregroundStyle(Theme.tertiary(scheme))
+                    if meeting.state != .ready {
+                        StateBadge(meeting: meeting, stage: stage)
+                    }
+                }
+
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(Theme.tertiary(scheme))
+                    .opacity(isHovered ? 0.7 : 0)
+                    .frame(width: 10)
+            }
+        }
+        .buttonStyle(MeetingRowButtonStyle(isHovered: isHovered))
+        .onHover { isHovered = $0 }
     }
 }
 
@@ -176,30 +476,101 @@ struct ParfaitStripes: View {
 }
 
 struct EmptyStateView: View {
+    @Environment(\.colorScheme) private var scheme
+    @Environment(\.parfaitActionColor) private var actionColor
     let title: String
     let message: String
+    var actionTitle: String?
+    var actionIcon: String?
+    var action: (() -> Void)?
+    var secondaryActionTitle: String?
+    var secondaryAction: (() -> Void)?
+    var tips: [String] = []
 
     var body: some View {
         VStack(spacing: 14) {
             ParfaitStripes()
             Text(title).font(.parfait(17, .semibold))
+                .foregroundStyle(Theme.heading(scheme))
             Text(message)
                 .font(.parfait(13))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Theme.secondary(scheme))
                 .multilineTextAlignment(.center)
-                .frame(maxWidth: 320)
+                .frame(maxWidth: 360)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if !tips.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(tips, id: \.self) { tip in
+                        HStack(alignment: .firstTextBaseline, spacing: 8) {
+                            Text("·")
+                                .font(.parfait(12, .bold))
+                            Text(tip)
+                                .font(.parfait(12))
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        .foregroundStyle(Theme.tertiary(scheme))
+                    }
+                }
+                .frame(maxWidth: 340, alignment: .leading)
+                .padding(.top, 2)
+            }
+
+            actionRow
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    @ViewBuilder
+    private var actionRow: some View {
+        let hasPrimary = actionTitle != nil && action != nil
+        let hasSecondary = secondaryActionTitle != nil && secondaryAction != nil
+        if hasPrimary || hasSecondary {
+            HStack(spacing: 10) {
+                if let actionTitle, let action {
+                    Button(action: action) {
+                        if let actionIcon {
+                            Label(actionTitle, systemImage: actionIcon)
+                        } else {
+                            Text(actionTitle)
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(actionColor)
+                    .controlSize(.regular)
+                }
+                if let secondaryActionTitle, let secondaryAction {
+                    Button(secondaryActionTitle, action: secondaryAction)
+                        .buttonStyle(.bordered)
+                        .controlSize(.regular)
+                }
+            }
+            .padding(.top, tips.isEmpty ? 0 : 4)
+        }
     }
 }
 
 /// Minimal markdown display for summaries: headings, bullets, checkboxes,
 /// inline bold/italic. Anything else renders as a plain paragraph.
 struct MarkdownText: View {
+    enum Style {
+        case card
+        case document
+    }
+
+    @Environment(\.colorScheme) private var scheme
+    @Environment(\.parfaitActionColor) private var actionColor
     let markdown: String
+    var style: Style = .card
+
+    private var bodySize: CGFloat { style == .document ? 13 : 14 }
+    private var lineSpacing: CGFloat { style == .document ? 5 : 7 }
+    private var bulletColor: Color {
+        style == .document ? Theme.tertiary(scheme) : Theme.honey(scheme)
+    }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 7) {
+        VStack(alignment: .leading, spacing: lineSpacing) {
             ForEach(Array(markdown.split(separator: "\n", omittingEmptySubsequences: false).enumerated()),
                     id: \.offset) { _, rawLine in
                 line(String(rawLine))
@@ -212,35 +583,47 @@ struct MarkdownText: View {
     private func line(_ raw: String) -> some View {
         let trimmed = raw.trimmingCharacters(in: .whitespaces)
         if trimmed.isEmpty {
-            Spacer().frame(height: 2)
+            Spacer().frame(height: style == .document ? 4 : 2)
         } else if trimmed.hasPrefix("# ") {
             inline(String(trimmed.dropFirst(2)))
-                .font(.parfait(22, .bold))
-                .padding(.top, 4)
+                .font(style == .document ? .parfait(15, .semibold) : .parfait(22, .bold))
+                .foregroundStyle(Theme.heading(scheme))
+                .padding(.top, style == .document ? 10 : 4)
         } else if trimmed.hasPrefix("## ") {
             inline(String(trimmed.dropFirst(3)))
-                .font(.parfait(16, .bold))
-                .foregroundStyle(Theme.raspberry)
-                .padding(.top, 8)
+                .font(style == .document ? .parfait(14, .semibold) : .parfait(16, .bold))
+                .foregroundStyle(
+                    style == .document
+                        ? Theme.heading(scheme)
+                        : Theme.sectionTitle(scheme, accent: actionColor))
+                .padding(.top, style == .document ? 8 : 8)
         } else if trimmed.hasPrefix("### ") {
             inline(String(trimmed.dropFirst(4)))
-                .font(.parfait(14, .semibold))
+                .font(.parfait(bodySize, .semibold))
+                .foregroundStyle(Theme.heading(scheme))
                 .padding(.top, 4)
         } else if trimmed.hasPrefix("- [ ] ") || trimmed.hasPrefix("- [x] ") {
             HStack(alignment: .firstTextBaseline, spacing: 6) {
                 Image(systemName: trimmed.hasPrefix("- [x] ") ? "checkmark.square.fill" : "square")
-                    .foregroundStyle(Theme.honey)
+                    .foregroundStyle(bulletColor)
                     .font(.system(size: 12))
                 inline(String(trimmed.dropFirst(6)))
+                    .font(.parfait(bodySize))
+                    .foregroundStyle(Theme.secondary(scheme))
             }
         } else if trimmed.hasPrefix("- ") || trimmed.hasPrefix("* ") {
-            HStack(alignment: .firstTextBaseline, spacing: 6) {
-                Circle().fill(Theme.honey).frame(width: 5, height: 5)
-                    .padding(.top, 5)
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Circle().fill(bulletColor).frame(width: 4, height: 4)
+                    .padding(.top, 6)
                 inline(String(trimmed.dropFirst(2)))
+                    .font(.parfait(bodySize))
+                    .foregroundStyle(Theme.secondary(scheme))
             }
+            .padding(.leading, style == .document ? 4 : 0)
         } else {
             inline(trimmed)
+                .font(.parfait(bodySize))
+                .foregroundStyle(Theme.secondary(scheme))
         }
     }
 

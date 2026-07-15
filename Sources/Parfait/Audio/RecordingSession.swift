@@ -7,6 +7,8 @@ import SwiftUI
 final class RecordingSession: ObservableObject {
     let meetingID: UUID
     let startedAt = Date()
+    /// Elapsed time already on the meeting before this session (continue recording).
+    private let elapsedOffset: TimeInterval
 
     @Published private(set) var elapsed: TimeInterval = 0
     @Published private(set) var micLevel: Float = 0
@@ -35,9 +37,10 @@ final class RecordingSession: ObservableObject {
         }
     }
 
-    init(meetingID: UUID, archive: MeetingArchive) {
+    init(meetingID: UUID, archive: MeetingArchive, elapsedOffset: TimeInterval = 0) {
         self.meetingID = meetingID
         self.archive = archive
+        self.elapsedOffset = elapsedOffset
     }
 
     func start(micURL: URL, systemURL: URL) throws {
@@ -46,7 +49,7 @@ final class RecordingSession: ObservableObject {
         // Live transcription runs alongside capture. Set the buffer sinks BEFORE
         // starting the recorders so no early audio is missed; it's best-effort —
         // any failure here never affects the recording itself.
-        let live = LiveTranscriber(startDate: startedAt)
+        let live = LiveTranscriber(startDate: startedAt, timeOffset: elapsedOffset)
         live.onUpdate = { [weak self] segments, volatile in
             Task { @MainActor in self?.applyLive(segments, volatile) }
         }
@@ -80,7 +83,7 @@ final class RecordingSession: ObservableObject {
         ticker = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
-                self.elapsed = Date().timeIntervalSince(self.startedAt)
+                self.elapsed = self.elapsedOffset + Date().timeIntervalSince(self.startedAt)
             }
         }
     }

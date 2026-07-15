@@ -6,6 +6,7 @@ import Foundation
 ///         meeting.json      Meeting
 ///         transcript.json   [TranscriptSegment]
 ///         summary.md        markdown
+///         notes.md          user scratch notes (during recording)
 ///         mic.m4a           the user's microphone
 ///         system.m4a        everyone else (process tap)
 ///
@@ -180,6 +181,21 @@ final class MeetingArchive: @unchecked Sendable {
         }
     }
 
+    // MARK: - Side notes (user scratch pad during recording)
+
+    func sideNotes(for id: UUID) -> String {
+        queue.sync {
+            (try? String(contentsOf: folder(for: id).appendingPathComponent("notes.md"), encoding: .utf8)) ?? ""
+        }
+    }
+
+    func saveSideNotes(_ text: String, for id: UUID) throws {
+        try queue.sync {
+            try text.data(using: .utf8)!
+                .write(to: folder(for: id).appendingPathComponent("notes.md"), options: .atomic)
+        }
+    }
+
     // MARK: - Search
 
     struct SearchHit: Sendable {
@@ -209,6 +225,14 @@ final class MeetingArchive: @unchecked Sendable {
                 if words.contains(where: { lower.contains($0) }) {
                     score += 3
                     if excerpts.count < 6 { excerpts.append(String(line).trimmingCharacters(in: .whitespaces)) }
+                }
+            }
+            let notes = sideNotes(for: meeting.id)
+            for line in notes.split(separator: "\n") {
+                let lower = line.lowercased()
+                if words.contains(where: { lower.contains($0) }) {
+                    score += 4
+                    if excerpts.count < 6 { excerpts.append("Note: \(String(line).trimmingCharacters(in: .whitespaces))") }
                 }
             }
             let speakerNames = Dictionary(uniqueKeysWithValues: meeting.speakers.map { ($0.id, $0.name) })

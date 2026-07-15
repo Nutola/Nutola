@@ -12,8 +12,12 @@ struct SettingsView: View {
                 .tabItem { Label("Intelligence", systemImage: "sparkles") }
             TemplateSettings()
                 .tabItem { Label("Templates", systemImage: "doc.text") }
+            CalendarSettings()
+                .tabItem { Label("Calendar", systemImage: "calendar") }
+            AppearanceSettings()
+                .tabItem { Label("Appearance", systemImage: "paintbrush") }
         }
-        .frame(width: 560, height: 480)
+        .frame(width: 560, height: 520)
     }
 }
 
@@ -24,12 +28,12 @@ private struct GeneralSettings: View {
     @AppStorage(SettingsKey.autoRecord) private var autoRecord = false
     @AppStorage(SettingsKey.autoStopRecording) private var autoStopRecording = true
     @AppStorage(SettingsKey.identifySpeakers) private var identifySpeakers = true
-    @AppStorage(SettingsKey.useCalendar) private var useCalendar = true
+    @AppStorage(SettingsKey.showLiveRecordingCard) private var showLiveRecordingCard = true
     @AppStorage(SettingsKey.defaultTemplate) private var defaultTemplate = "Meeting Notes"
     @AppStorage(SettingsKey.systemAudioConfirmed) private var systemAudioConfirmed = false
 
     @State private var micStatus = MicRecorder.permissionGranted
-    @State private var calendarStatus = CalendarMatcher.isAuthorized
+    @AppStorage(SettingsKey.openMainWindowAtLaunch) private var openMainWindowAtLaunch = true
     @State private var launchAtLogin = LaunchAtLogin.isOn
     @State private var systemAudioStatus = SystemAudioPermission.status()
 
@@ -41,6 +45,10 @@ private struct GeneralSettings: View {
                 Text(LaunchAtLogin.requiresApproval
                      ? "Approve Parfait under System Settings → General → Login Items to finish enabling this."
                      : "Starts Parfait in the menu bar automatically when you log in.")
+                    .font(.parfait(11))
+                    .foregroundStyle(.secondary)
+                Toggle("Open Parfait window at launch", isOn: $openMainWindowAtLaunch)
+                Text("Shows the main window when Parfait starts. Turn off to stay in the menu bar until you open it.")
                     .font(.parfait(11))
                     .foregroundStyle(.secondary)
                 Button("Run setup walkthrough again") { openWindow(id: "onboarding") }
@@ -64,6 +72,12 @@ private struct GeneralSettings: View {
                 Text("Waits ~8s after the meeting app releases the microphone, in case it reconnects.")
                     .font(.parfait(11))
                     .foregroundStyle(.secondary)
+                Toggle("Show floating transcript while recording", isOn: $showLiveRecordingCard)
+                    .onAppear { app.showLiveRecordingCard = showLiveRecordingCard }
+                    .onChange(of: showLiveRecordingCard) { app.showLiveRecordingCard = showLiveRecordingCard }
+                Text("The draggable live transcript card. Turn off to record from the menu bar only.")
+                    .font(.parfait(11))
+                    .foregroundStyle(.secondary)
                 if detectMeetings {
                     HStack(alignment: .top) {
                         StatusDot(ok: app.activeMicAppNames.isEmpty ? nil : true)
@@ -81,20 +95,6 @@ private struct GeneralSettings: View {
                 Text("Separates different voices on the call using a small on-device model (~22 MB, downloaded once).")
                     .font(.parfait(11))
                     .foregroundStyle(.secondary)
-                Toggle("Match calendar events", isOn: $useCalendar)
-                if useCalendar, !calendarStatus {
-                    HStack {
-                        StatusDot(ok: false)
-                        Text("Calendar access needed for titles and attendee names")
-                            .font(.parfait(11))
-                        Button("Grant…") {
-                            Task {
-                                calendarStatus = await CalendarMatcher.requestAccess()
-                            }
-                        }
-                        .controlSize(.small)
-                    }
-                }
                 Picker("Default template", selection: $defaultTemplate) {
                     ForEach(app.templates.list()) { Text($0.name).tag($0.name) }
                 }
@@ -161,7 +161,6 @@ private struct GeneralSettings: View {
         .formStyle(.grouped)
         .onAppear {
             micStatus = MicRecorder.permissionGranted
-            calendarStatus = CalendarMatcher.isAuthorized
             launchAtLogin = LaunchAtLogin.isOn
             systemAudioStatus = SystemAudioPermission.status()
         }
@@ -212,7 +211,164 @@ private struct GeneralSettings: View {
     }
 }
 
+private struct CalendarSettings: View {
+    @EnvironmentObject private var app: AppState
+    @AppStorage(SettingsKey.useCalendar) private var useCalendar = true
+    @AppStorage(SettingsKey.upcomingCountdownHours) private var upcomingCountdownHours = 3.0
+    @AppStorage(SettingsKey.showUpcomingInMenuBar) private var showUpcomingInMenuBar = true
+    @AppStorage(SettingsKey.showEventsWithoutParticipants) private var showEventsWithoutParticipants = true
+
+    @State private var calendarStatus = CalendarAuthorization.isAuthorized
+    @State private var calendars: [CalendarSourceInfo] = []
+    @State private var disabledIDs: Set<String> = AppSettings.disabledCalendarIDs
+
+    var body: some View {
+        Form {
+            if !calendarStatus {
+                Section {
+                    HStack(alignment: .firstTextBaseline) {
+                        StatusDot(ok: false)
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Calendar access is required to show your schedule.")
+                                .font(.parfait(12))
+                            if CalendarAuthorization.isDenied {
+                                Button("Open System Settings") {
+                                    NSWorkspace.shared.open(URL(
+                                        string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Calendars")!)
+                                }
+                                .controlSize(.small)
+                            } else {
+                                Button("Grant access…") {
+                                    Task { await grantAccess() }
+                                }
+                                .controlSize(.small)
+                            }
+                        }
+                    }
+                }
+            }
+
+            Section("Display") {
+                Toggle("Match calendar events", isOn: $useCalendar)
+                    .onChange(of: useCalendar) {
+                        Task { await app.calendar.refreshAgenda() }
+                    }
+                Text("Uses your calendar for titles, attendees, and the Coming up view.")
+                    .font(.parfait(11))
+                    .foregroundStyle(.secondary)
+                Toggle("Show upcoming meetings in menu bar", isOn: $showUpcomingInMenuBar)
+                    .disabled(!useCalendar)
+                Text("Displays your next meeting and time until it starts in the macOS menu bar.")
+                    .font(.parfait(11))
+                    .foregroundStyle(.secondary)
+                if useCalendar {
+                    Stepper(value: $upcomingCountdownHours, in: 0.5...12, step: 0.5) {
+                        Text("Countdown window: \(countdownLabel)")
+                            .font(.parfait(12))
+                    }
+                }
+                Toggle("Show events with no participants", isOn: $showEventsWithoutParticipants)
+                    .disabled(!useCalendar)
+                    .onChange(of: showEventsWithoutParticipants) {
+                        Task { await app.calendar.refreshAgenda() }
+                    }
+                Text("Coming up includes events without attendees or a video link when on.")
+                    .font(.parfait(11))
+                    .foregroundStyle(.secondary)
+            }
+
+            if calendarStatus {
+                Section {
+                    HStack {
+                        Text("Visible calendars")
+                            .font(.parfait(12, .semibold))
+                        Spacer()
+                        Button("Reset") { resetCalendars() }
+                            .buttonStyle(.plain)
+                            .font(.parfait(11, .medium))
+                            .foregroundStyle(Theme.blueberry)
+                            .disabled(disabledIDs.isEmpty)
+                    }
+                    if calendars.isEmpty {
+                        Text("No calendars found on this Mac.")
+                            .font(.parfait(11))
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(calendars) { source in
+                            calendarRow(source)
+                        }
+                    }
+                    Text("Only events from enabled calendars appear in Coming up and when matching recordings.")
+                        .font(.parfait(11))
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+        .formStyle(.grouped)
+        .onAppear { reloadCalendars() }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            calendarStatus = CalendarAuthorization.isAuthorized
+            reloadCalendars()
+        }
+    }
+
+    private func calendarRow(_ source: CalendarSourceInfo) -> some View {
+        Toggle(isOn: calendarBinding(source.id)) {
+            HStack(spacing: 8) {
+                Circle()
+                    .fill(source.color)
+                    .frame(width: 8, height: 8)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(source.title)
+                        .font(.parfait(12, .medium))
+                    if let account = source.sourceTitle, account != source.title {
+                        Text(account)
+                            .font(.parfait(10))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+        }
+        .disabled(!useCalendar)
+    }
+
+    private func calendarBinding(_ id: String) -> Binding<Bool> {
+        Binding(
+            get: { !disabledIDs.contains(id) },
+            set: { enabled in
+                if enabled { disabledIDs.remove(id) } else { disabledIDs.insert(id) }
+                AppSettings.setCalendarEnabled(id: id, enabled: enabled)
+                Task { await app.calendar.refreshAgenda() }
+            })
+    }
+
+    private var countdownLabel: String {
+        upcomingCountdownHours == floor(upcomingCountdownHours)
+            ? "\(Int(upcomingCountdownHours)) hours"
+            : String(format: "%.1f hours", upcomingCountdownHours)
+    }
+
+    private func reloadCalendars() {
+        calendarStatus = CalendarAuthorization.isAuthorized
+        disabledIDs = AppSettings.disabledCalendarIDs
+        calendars = CalendarSources.all()
+    }
+
+    private func grantAccess() async {
+        calendarStatus = await CalendarAuthorization.requestAccess()
+        reloadCalendars()
+        await app.calendar.refreshAgenda()
+    }
+
+    private func resetCalendars() {
+        AppSettings.resetCalendarSelection()
+        disabledIDs = []
+        Task { await app.calendar.refreshAgenda() }
+    }
+}
+
 private struct IntelligenceSettings: View {
+    @Environment(\.parfaitActionColor) private var actionColor
     @State private var claudeInstalled = false
     @State private var claudeLoggedIn = false
     @State private var ghAvailable = false
@@ -222,6 +378,8 @@ private struct IntelligenceSettings: View {
     @State private var codexSetupAvailable = false
     @AppStorage(SettingsKey.preferClaudeSummaries) private var preferClaudeSummaries = false
     @AppStorage(SettingsKey.preferredAIProvider) private var preferredAIProvider: AIProvider = .apple
+    @AppStorage(SettingsKey.askDeliveryMode) private var askDeliveryMode: AskDeliveryMode = .cli
+    @AppStorage(SettingsKey.askMaxTurns) private var askMaxTurns = 5
 
     private var cloudAssistantReady: Bool {
         switch preferredAIProvider {
@@ -287,6 +445,24 @@ private struct IntelligenceSettings: View {
                 Text("Choose which assistant Parfait uses for meeting chat and summaries.")
                     .font(.parfait(11))
                     .foregroundStyle(.secondary)
+
+                if preferredAIProvider.isCloud {
+                    Picker("Answer with", selection: $askDeliveryMode) {
+                        ForEach(AskDeliveryMode.allCases) { mode in
+                            Text(mode.displayName).tag(mode)
+                        }
+                    }
+                    Text(askDeliveryMode.detail)
+                        .font(.parfait(11))
+                        .foregroundStyle(.secondary)
+
+                    if askDeliveryMode == .cli {
+                        Stepper("Context rounds: \(askMaxTurns)", value: $askMaxTurns, in: 3...15)
+                        Text("How many tool rounds the CLI can use to search and read meetings. Raise this for long transcripts.")
+                            .font(.parfait(11))
+                            .foregroundStyle(.secondary)
+                    }
+                }
 
                 switch preferredAIProvider {
                 case .apple:
@@ -421,7 +597,7 @@ private struct IntelligenceSettings: View {
                 HStack {
                     Button("Add to Claude Code") { ClaudeCode.addMCPServer(binary: binaryPath) }
                         .buttonStyle(.borderedProminent)
-                        .tint(Theme.raspberry)
+                        .tint(actionColor)
                     Button("Add to Claude Desktop") {
                         ClaudeCode.addToClaudeDesktop(
                             binary: binaryPath, configPath: claudeDesktopConfigURL.path)
@@ -480,7 +656,7 @@ private struct IntelligenceSettings: View {
                 HStack {
                     Button("Add with Codex") { CodexSetup.addMCPServer(binary: binaryPath) }
                         .buttonStyle(.borderedProminent)
-                        .tint(Theme.raspberry)
+                        .tint(actionColor)
                         .disabled(!codexSetupAvailable)
                 }
                 .controlSize(.small)
@@ -548,6 +724,7 @@ private struct IntelligenceSettings: View {
 }
 
 private struct TemplateSettings: View {
+    @Environment(\.parfaitActionColor) private var actionColor
     @EnvironmentObject private var app: AppState
     @State private var templates: [SummaryTemplate] = []
     @State private var selected: String?
@@ -609,7 +786,7 @@ private struct TemplateSettings: View {
                         Spacer()
                         Button("Save") { save() }
                             .buttonStyle(.borderedProminent)
-                            .tint(Theme.raspberry)
+                            .tint(actionColor)
                             .disabled(!TemplateStore.isValid(name: draftName))
                     }
                 } else {
@@ -651,6 +828,78 @@ private struct TemplateSettings: View {
         } catch {
             saveError = error.localizedDescription
         }
+    }
+}
+
+private struct AppearanceSettings: View {
+    @Environment(\.colorScheme) private var scheme
+    @AppStorage(SettingsKey.appearanceMode) private var appearanceMode = AppearanceMode.system.rawValue
+    @AppStorage(SettingsKey.actionColorHex) private var actionColorHex = Theme.defaultActionColorHex
+
+    private var baseActionColor: Color {
+        Color(hex: actionColorHex) ?? Theme.raspberry
+    }
+
+    private var actionColor: Color {
+        Theme.prominentAction(baseActionColor, scheme: scheme)
+    }
+
+    var body: some View {
+        Form {
+            Section("Theme") {
+                Picker("Appearance", selection: $appearanceMode) {
+                    ForEach(AppearanceMode.allCases) { mode in
+                        Text(mode.displayName).tag(mode.rawValue)
+                    }
+                }
+                .pickerStyle(.segmented)
+                Text("Choose light or dark mode, or follow your Mac's system setting.")
+                    .font(.parfait(11))
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("Action color") {
+                HStack {
+                    Button("Record") {}
+                        .buttonStyle(.borderedProminent)
+                        .tint(actionColor)
+                        .allowsHitTesting(false)
+                    Spacer()
+                }
+
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 36))], spacing: 10) {
+                    ForEach(ActionColorPreset.allCases) { preset in
+                        Button {
+                            actionColorHex = preset.rawValue
+                        } label: {
+                            Circle()
+                                .fill(preset.color)
+                                .frame(width: 32, height: 32)
+                                .overlay {
+                                    if actionColorHex.uppercased() == preset.rawValue {
+                                        Circle().strokeBorder(Color.primary, lineWidth: 2)
+                                    }
+                                }
+                        }
+                        .buttonStyle(.plain)
+                        .help(preset.name)
+                    }
+                }
+
+                ColorPicker("Custom color", selection: Binding(
+                    get: { actionColor },
+                    set: { newColor in
+                        if let hex = newColor.hexString {
+                            actionColorHex = hex
+                        }
+                    }
+                ))
+                Text("Used for Record, Save, and other prominent buttons. Adjusted automatically for readable labels in each theme.")
+                    .font(.parfait(11))
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .formStyle(.grouped)
     }
 }
 
