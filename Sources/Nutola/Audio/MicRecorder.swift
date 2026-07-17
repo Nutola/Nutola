@@ -333,6 +333,20 @@ final class MicRecorder: @unchecked Sendable {
         try engine.start()
         NutolaConsoleLog.recording(
             "mic engine started device=[\(inputName)] fileRate=\(file.processingFormat.sampleRate)")
+        // TCC silent-block detector: if no buffers arrive within 5s, the mic
+        // permission was silently denied by TCC (common with ad-hoc signed apps
+        // after a rebuild — AVCaptureDevice.authorizationStatus says denied, but
+        // AVAudioEngine.start() succeeds, so the engine "runs" with zero buffers).
+        restartQueue.asyncAfter(deadline: .now() + 5) { [weak self] in
+            guard let self else { return }
+            self.lock.lock()
+            let received = self.captureStats.receivedAnyBuffer
+            self.lock.unlock()
+            if !received {
+                NutolaConsoleLog.recording(
+                    "mic WARNING — no buffers after 5s. TCC may be blocking mic access (ad-hoc signing). Try: System Settings → Privacy & Security → Microphone → toggle Nutola OFF then ON")
+            }
+        }
         } catch {
             let ns = error as NSError
             NutolaConsoleLog.recording(
