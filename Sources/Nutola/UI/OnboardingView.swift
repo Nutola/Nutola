@@ -73,6 +73,9 @@ struct OnboardingView: View {
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             systemAudioStatus = SystemAudioPermission.status()
             accessibilityTrusted = AccessibilityPermission.isTrusted
+            micStatus = MicRecorder.permissionGranted
+            calendarStatus = CalendarAuthorization.isAuthorized
+            Task { await app.refreshNotificationStatus() }
         }
     }
 

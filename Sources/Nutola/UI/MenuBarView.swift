@@ -47,9 +47,12 @@ struct MenuBarView: View {
                     showQuitConfirm = true
                 } label: {
                     Image(systemName: "power")
+                        .font(.nutola(13, .medium))
+                        .foregroundStyle(.red)
+                        .frame(width: 28, height: 28)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .foregroundStyle(.red)
                 .help("Quit Nutola")
             }
         }
