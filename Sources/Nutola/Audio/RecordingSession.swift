@@ -92,20 +92,17 @@ final class RecordingSession: ObservableObject {
             Task { @MainActor in self?.micBarLevels = levels }
         }
         mic.bufferSink = { [weak live] buffer in live?.feedMic(buffer) }
-        do {
-            try mic.start(writingTo: micURL)
-            micStarted = true
-        } catch {
-            let ns = error as NSError
-            NutolaConsoleLog.recording(
-                "mic start failed domain=\(ns.domain) code=\(ns.code) — \(error.localizedDescription)")
-            problems.append("microphone: \(error.localizedDescription)")
-        }
         tap.signalDetectedHandler = {
             AppSettings.markSystemAudioConfirmed()
             NutolaConsoleLog.recording("system audio confirmed — non-silent signal received")
         }
         tap.bufferSink = { [weak live] buffer in live?.feedSystem(buffer) }
+        // Start the system audio tap FIRST. It creates a Core Audio aggregate
+        // device (AudioHardwareCreateAggregateDevice) which can disrupt an
+        // already-running AVAudioEngine's input node — the engine's input route
+        // becomes stale and no buffers arrive. Starting the tap first means the
+        // aggregate device exists before the mic engine starts, so the engine
+        // binds to the correct input device.
         do {
             try tap.start(writingTo: systemURL)
             systemStarted = true
@@ -115,6 +112,15 @@ final class RecordingSession: ObservableObject {
             NutolaConsoleLog.recording(
                 "system tap start failed domain=\(ns.domain) code=\(ns.code) — \(error.localizedDescription)")
             problems.append("system audio: \(error.localizedDescription)")
+        }
+        do {
+            try mic.start(writingTo: micURL)
+            micStarted = true
+        } catch {
+            let ns = error as NSError
+            NutolaConsoleLog.recording(
+                "mic start failed domain=\(ns.domain) code=\(ns.code) — \(error.localizedDescription)")
+            problems.append("microphone: \(error.localizedDescription)")
         }
         guard micStarted || systemStarted else {
             NutolaConsoleLog.recording("failed to start — \(problems.joined(separator: "; "))")
