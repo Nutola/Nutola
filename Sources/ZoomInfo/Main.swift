@@ -204,6 +204,7 @@ struct ScanResult {
     var active: [String] = []
     var activeSource: String = "activeSpeaker"
     var latestCaption: CaptionLine?
+    var localParticipantMuted: Bool?
 }
 
 func zoomScan() -> ScanResult {
@@ -222,6 +223,7 @@ func zoomScan() -> ScanResult {
     var activeLabels = [String]()
     var selectedTiles = [String]()
     var latestCaption: CaptionLine?
+    var localMuted: Bool?
 
     func walk(_ element: AXUIElement, depth: Int) {
         guard depth < 20 else { return }
@@ -232,6 +234,11 @@ func zoomScan() -> ScanResult {
                 if let name = parseZoomParticipantDescription(desc) {
                     roster.append(name)
                     if axIsSelected(element) { selectedTiles.append(name) }
+                    if localMuted == nil, isLocalParticipant(name) {
+                        let lower = desc.lowercased()
+                        if lower.contains("computer audio muted") { localMuted = true }
+                        else if lower.contains("computer audio unmuted") { localMuted = false }
+                    }
                 }
                 if let name = parseZoomTileDescription(desc) {
                     activeTiles.append(name)
@@ -306,7 +313,8 @@ func zoomScan() -> ScanResult {
         roster: rosterOut,
         active: deduped(activeOut).filter { !isLocalParticipant($0) },
         activeSource: source,
-        latestCaption: latestCaption)
+        latestCaption: latestCaption,
+        localParticipantMuted: localMuted)
 }
 
 // MARK: - AX tree dump
@@ -465,6 +473,11 @@ func printPretty(scan: ScanResult, trusted: Bool) {
     let local = scan.roster.filter(isLocalParticipant)
     let remote = scan.roster.filter { !isLocalParticipant($0) }
     print("Local (you): \(local.isEmpty ? "(not found)" : local.joined(separator: ", "))")
+    if let muted = scan.localParticipantMuted {
+        print("Mic (you): \(muted ? "MUTED in Zoom — mic paused" : "UNMUTED in Zoom — mic active")")
+    } else {
+        print("Mic (you): (mute state unknown — local tile not found)")
+    }
     let remoteStr = remote.isEmpty ? "(none)" : "[\(remote.joined(separator: ", "))]"
     print("Remote: \(remoteStr)")
 }
@@ -482,6 +495,9 @@ func printJSON(scan: ScanResult, trusted: Bool) {
     if let pid = scan.zoomPID { obj["zoomPID"] = String(pid) }
     if let caption = scan.latestCaption {
         obj["latestCaption"] = ["name": caption.name, "text": caption.text]
+    }
+    if let muted = scan.localParticipantMuted {
+        obj["localParticipantMuted"] = muted
     }
     if let data = try? JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted, .sortedKeys]),
        let json = String(data: data, encoding: .utf8) {
