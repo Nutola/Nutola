@@ -32,11 +32,19 @@ final class MicRecorder: @unchecked Sendable {
     }
 
     static var permissionGranted: Bool {
-        AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
+        // AVAudioApplication is the correct TCC API for AVAudioEngine mic
+        // access on macOS 14+. AVCaptureDevice.authorizationStatus(for: .audio)
+        // can diverge (returns .denied when AVAudioApplication is .granted),
+        // especially with ad-hoc signed apps whose CDHash changes per rebuild.
+        AVAudioApplication.shared.recordPermission == .granted
     }
 
     static func requestPermission() async -> Bool {
-        await AVCaptureDevice.requestAccess(for: .audio)
+        await withCheckedContinuation { continuation in
+            AVAudioApplication.requestRecordPermission { granted in
+                continuation.resume(returning: granted)
+            }
+        }
     }
 
     /// True when the default input routes over Bluetooth (AirPods, etc.). Zoom often
@@ -305,6 +313,8 @@ final class MicRecorder: @unchecked Sendable {
             ],
             commonFormat: .pcmFormatFloat32,
             interleaved: false)
+        self.file = file
+        self.engine = engine
         do {
         try installTapLocked(on: engine)
         configObserver = NotificationCenter.default.addObserver(
@@ -333,10 +343,12 @@ final class MicRecorder: @unchecked Sendable {
         try engine.start()
         NutolaConsoleLog.recording(
             "mic engine started device=[\(inputName)] fileRate=\(file.processingFormat.sampleRate)")
-        // TCC silent-block detector: if no buffers arrive within 5s, the mic
-        // permission was silently denied by TCC (common with ad-hoc signed apps
-        // after a rebuild — AVCaptureDevice.authorizationStatus says denied, but
-        // AVAudioEngine.start() succeeds, so the engine "runs" with zero buffers).
+        // TCC silent-block detector + auto-restart: if no buffers arrive within
+        // 5s, the mic permission was silently denied by TCC when the engine
+        // started (common with ad-hoc signed apps after a rebuild, or when the
+        // TCC prompt appears after the engine already started). Restarting the
+        // engine re-acquires the audio input now that TCC has fully granted
+        // access at the kernel level.
         restartQueue.asyncAfter(deadline: .now() + 5) { [weak self] in
             guard let self else { return }
             self.lock.lock()
@@ -344,7 +356,19 @@ final class MicRecorder: @unchecked Sendable {
             self.lock.unlock()
             if !received {
                 NutolaConsoleLog.recording(
-                    "mic WARNING — no buffers after 5s. TCC may be blocking mic access (ad-hoc signing). Try: System Settings → Privacy & Security → Microphone → toggle Nutola OFF then ON")
+                    "mic no buffers after 5s — restarting engine (TCC grant may have arrived late)")
+                self.restartAfterConfigurationChange()
+                // Check again after restart — if still no buffers, warn.
+                self.restartQueue.asyncAfter(deadline: .now() + 5) { [weak self] in
+                    guard let self else { return }
+                    self.lock.lock()
+                    let stillEmpty = !self.captureStats.receivedAnyBuffer
+                    self.lock.unlock()
+                    if stillEmpty {
+                        NutolaConsoleLog.recording(
+                            "mic WARNING — still no buffers after restart. TCC may be blocking mic access. Try: System Settings → Privacy & Security → Microphone → toggle Nutola OFF then ON")
+                    }
+                }
             }
         }
         } catch {
@@ -401,7 +425,7 @@ final class MicRecorder: @unchecked Sendable {
         // installTap throws an ObjC NSException (not a Swift Error) when the format
         // doesn't match the live route — e.g. Bluetooth headphones connecting
         // mid-recording flips the hardware format. Swift can't catch NSException,
-        // so an unwrapped throw becomes SIGABRT and kills the app. Run it inside an
+        // so an unwrapped throw becomes SIGABRT and kills the process. Run it inside an
         // ObjC @try/@catch and surface it as a Swift error instead.
         let exception = NutolaTryBlock {
             input.installTap(onBus: 0, bufferSize: 1024, format: format, block: tapBlock)
