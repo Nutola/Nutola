@@ -13,6 +13,10 @@ protocol PlatformSpeakerTracker: AnyObject {
     /// Called on the main queue whenever the active remote speaker changes.
     var onActiveSpeaker: (@MainActor (String?) -> Void)? { get set }
 
+    /// Called on the main queue when the local participant's Zoom mute state changes.
+    /// True = muted (stop mic capture), false = unmuted (resume mic capture).
+    var onLocalMuteChanged: (@MainActor (Bool) -> Void)? { get set }
+
     /// Thread-safe snapshot of the active speaker name at elapsed time `t`,
     /// for attributing live system-audio segments.
     func speakerAt(_ elapsed: TimeInterval) -> String?
@@ -53,6 +57,7 @@ enum PlatformSpeakerTrackerFactory {
 /// nil (so diarization owns attribution) and the roster stays empty.
 final class NoopSpeakerTracker: PlatformSpeakerTracker {
     var onActiveSpeaker: (@MainActor (String?) -> Void)?
+    var onLocalMuteChanged: (@MainActor (Bool) -> Void)?
     func speakerAt(_ elapsed: TimeInterval) -> String? { nil }
     func currentRoster() -> [String] { [] }
     func start() {}

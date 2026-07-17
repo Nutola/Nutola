@@ -25,6 +25,9 @@ final class RecordingSession: ObservableObject {
     @Published private(set) var liveRoster: [String] = []
     private(set) var micStarted = false
     private(set) var systemStarted = false
+    /// True when the local participant is muted in Zoom — the mic buffer sink is
+    /// disconnected so no silent buffers reach the live transcriber or the .m4a file.
+    private var micPaused = false
 
     private let mic = MicRecorder()
     private let tap = SystemAudioTap()
@@ -283,6 +286,19 @@ final class RecordingSession: ObservableObject {
         tracker.onActiveSpeaker = { [weak self] name in
             NutolaConsoleLog.zoom("UI activeRemoteSpeaker=\(name ?? "nil")")
             self?.activeRemoteSpeaker = name
+        }
+        tracker.onLocalMuteChanged = { [weak self] muted in
+            guard let self else { return }
+            self.micPaused = muted
+            if muted {
+                NutolaConsoleLog.zoom("mic paused — local participant muted in Zoom")
+                self.mic.bufferSink = nil
+            } else {
+                NutolaConsoleLog.zoom("mic resumed — local participant unmuted in Zoom")
+                if let live = self.liveTranscriber {
+                    self.mic.bufferSink = { buffer in live.feedMic(buffer) }
+                }
+            }
         }
         // Poll the tracker's roster for the live UI (participant names).
         let timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in

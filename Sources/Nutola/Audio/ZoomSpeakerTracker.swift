@@ -22,9 +22,14 @@ final class ZoomSpeakerTracker: PlatformSpeakerTracker, @unchecked Sendable {
     private var lastCaptionKey: String?
     private var lastRoster: [String] = []
     private var rosterPersisted = false
+    private var lastLocalMuted: Bool?
 
-    /// Called on the main queue whenever the active remote speaker changes.
-    var onActiveSpeaker: (@MainActor (String?) -> Void)?
+    /// Called on the main queue when the local participant's Zoom mute state changes.
+    /// True = muted in Zoom (don't capture mic), false = unmuted (capture mic).
+    var onLocalMuteChanged: (@MainActor (Bool) -> Void)?
+
+     /// Called on the main queue whenever the active remote speaker changes.
+     var onActiveSpeaker: (@MainActor (String?) -> Void)?
     /// Thread-safe snapshot of the active speaker name at a given elapsed time.
     /// Called from the LiveTranscriber's handle() to attribute system-audio
     /// segments to the Zoom-reported speaker instead of generic "Others".
@@ -159,6 +164,16 @@ final class ZoomSpeakerTracker: PlatformSpeakerTracker, @unchecked Sendable {
             rosterPersisted = true
         }
 
+        // Detect local participant's mute state change. When muted in Zoom,
+        // the mic should stop capturing (silence anyway) and live segments
+        // should not be attributed to "me". When unmuted, resume capturing.
+        if let muted = scan.localParticipantMuted, muted != lastLocalMuted {
+            lastLocalMuted = muted
+            NutolaConsoleLog.zoom("local participant \(muted ? "muted" : "unmuted") — \(muted ? "pausing mic capture" : "resuming mic capture")")
+            let cb = onLocalMuteChanged
+            DispatchQueue.main.async { cb?(muted) }
+        }
+
         let now = Date()
         if now.timeIntervalSince(lastSummary) >= 5 {
             lastSummary = now
@@ -239,6 +254,9 @@ enum ZoomActiveSpeakerReader {
         var active: [String]
         var activeSource: PlatformSpeakerSource
         var latestCaption: CaptionLine?
+        /// True when the local participant's Zoom tile says "Computer audio muted".
+        /// Nil when the local participant's tile wasn't found in this scan.
+        var localParticipantMuted: Bool?
     }
 
     private static let mainBundleID = "us.zoom.xos"
@@ -257,14 +275,14 @@ enum ZoomActiveSpeakerReader {
         guard AccessibilityPermission.isTrusted else {
             return ScanResult(
                 zoomPID: nil, roster: [], active: [], activeSource: .activeSpeaker,
-                latestCaption: nil)
+                latestCaption: nil, localParticipantMuted: nil)
         }
         guard let app = NSWorkspace.shared.runningApplications.first(where: {
             $0.bundleIdentifier == mainBundleID
         }) else {
             return ScanResult(
                 zoomPID: nil, roster: [], active: [], activeSource: .activeSpeaker,
-                latestCaption: nil)
+                latestCaption: nil, localParticipantMuted: nil)
         }
 
         let root = AXUIElementCreateApplication(app.processIdentifier)
@@ -273,6 +291,7 @@ enum ZoomActiveSpeakerReader {
         var activeLabels: [String] = []
         var selectedTiles: [String] = []
         var latestCaption: CaptionLine?
+        var localMuted: Bool?
         // Strategy: try multiple AX entry points to find participant tiles.
         // 1. kAXWindowsAttribute — all windows (works when on the active Space).
         // 2. kAXFocusedWindowAttribute — the focused window (works even when on
@@ -289,13 +308,13 @@ enum ZoomActiveSpeakerReader {
             walk(
                 root, depth: 0, roster: &roster, activeTiles: &activeTiles,
                 activeLabels: &activeLabels, selectedTiles: &selectedTiles,
-                latestCaption: &latestCaption)
+                latestCaption: &latestCaption, localMuted: &localMuted)
         } else {
             for window in scannedWindows {
                 walk(
                     window, depth: 0, roster: &roster, activeTiles: &activeTiles,
                     activeLabels: &activeLabels, selectedTiles: &selectedTiles,
-                    latestCaption: &latestCaption)
+                    latestCaption: &latestCaption, localMuted: &localMuted)
             }
         }
         let rosterOut = deduped(roster)
@@ -318,7 +337,8 @@ enum ZoomActiveSpeakerReader {
             roster: rosterOut,
             active: deduped(activeOut).filter { !isLocalParticipant($0) },
             activeSource: source,
-            latestCaption: latestCaption)
+            latestCaption: latestCaption,
+            localParticipantMuted: localMuted)
     }
 
     /// Diagnostic: dumps the full Zoom AX tree (first ~500 elements) to the unified
@@ -399,7 +419,8 @@ enum ZoomActiveSpeakerReader {
         activeTiles: inout [String],
         activeLabels: inout [String],
         selectedTiles: inout [String],
-        latestCaption: inout CaptionLine?
+        latestCaption: inout CaptionLine?,
+        localMuted: inout Bool?
     ) {
         guard depth < 20 else { return }
 
@@ -410,6 +431,16 @@ enum ZoomActiveSpeakerReader {
                     roster.append(name)
                     if isSelected(element) {
                         selectedTiles.append(name)
+                    }
+                    // Detect the local participant's mute state from the tile
+                    // description: "Name, Computer audio muted/unmuted, Video on/off".
+                    if localMuted == nil, isLocalParticipant(name) {
+                        let lower = desc.lowercased()
+                        if lower.contains("computer audio muted") {
+                            localMuted = true
+                        } else if lower.contains("computer audio unmuted") {
+                            localMuted = false
+                        }
                     }
                 }
                 if let name = parseZoomTileDescription(desc) {
@@ -443,7 +474,7 @@ enum ZoomActiveSpeakerReader {
             walk(
                 child, depth: depth + 1, roster: &roster, activeTiles: &activeTiles,
                 activeLabels: &activeLabels, selectedTiles: &selectedTiles,
-                latestCaption: &latestCaption)
+                latestCaption: &latestCaption, localMuted: &localMuted)
         }
     }
 
