@@ -404,7 +404,7 @@ private struct CalendarSettings: View {
 
             if useCalendar {
                 Section("Archived events") {
-                    if archivedStore.archivedTitles.isEmpty && archivedStore.archivedEventIDs.isEmpty {
+                    if !archivedStore.hasAny {
                         Text("No archived events. Right-click an event in Coming up to hide it.")
                             .font(.nutola(11))
                             .foregroundStyle(.secondary)
@@ -425,13 +425,13 @@ private struct CalendarSettings: View {
                                 .help("Unarchive series")
                             }
                         }
-                        ForEach(Array(archivedStore.archivedEventIDs).sorted(), id: \.self) { id in
+                        ForEach(archivedStore.archivedEvents) { evt in
                             HStack {
-                                Label("Event \(String(id.prefix(8)))", systemImage: "archivebox")
+                                Label(evt.title, systemImage: "archivebox")
                                     .font(.nutola(12))
                                 Spacer()
                                 Button {
-                                    archivedStore.unarchiveEvent(id: id)
+                                    archivedStore.unarchiveEvent(id: evt.id)
                                     Task { await app.calendar.refreshAgenda() }
                                 } label: {
                                     Image(systemName: "arrow.up.out.of.square")
@@ -450,9 +450,6 @@ private struct CalendarSettings: View {
                                 .font(.nutola(11))
                         }
                     }
-                    Text("Archived events are hidden from Coming up and the menu bar. Right-click any event to archive it.")
-                        .font(.nutola(11))
-                        .foregroundStyle(.secondary)
                 }
             }
         }
