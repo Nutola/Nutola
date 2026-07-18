@@ -205,7 +205,7 @@ struct MenuBarView: View {
                     Label("Archive series", systemImage: "archivebox.fill")
                 }
                 Button {
-                    archivedStore.archiveEvent(id: event.id)
+                    archivedStore.archiveEvent(id: event.id, title: event.title)
                     Task { await app.calendar.refreshAgenda() }
                 } label: {
                     Label("Archive this event", systemImage: "archivebox")

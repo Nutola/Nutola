@@ -4,10 +4,16 @@ import Foundation
 ///
 /// Two modes:
 /// - **By title** (series): hides all events sharing a title (e.g. "Lunch time" recurring)
-/// - **By event ID**: hides a single event instance
+/// - **By event ID**: hides a single event instance (stores the title for display)
 final class ArchivedEventStore: ObservableObject {
     @Published private(set) var archivedTitles: Set<String>
-    @Published private(set) var archivedEventIDs: Set<String>
+    @Published private(set) var archivedEvents: [ArchivedEvent]
+
+    struct ArchivedEvent: Codable, Identifiable, Equatable, Sendable {
+        let id: String
+        let title: String
+        var eventID: String { id }
+    }
 
     private let defaults: UserDefaults
     private let titlesKey: String
@@ -20,7 +26,14 @@ final class ArchivedEventStore: ObservableObject {
         self.titlesKey = titlesKey
         self.idsKey = idsKey
         self.archivedTitles = Set(defaults.stringArray(forKey: titlesKey) ?? [])
-        self.archivedEventIDs = Set(defaults.stringArray(forKey: idsKey) ?? [])
+        if let data = defaults.data(forKey: idsKey),
+           let decoded = try? JSONDecoder().decode([ArchivedEvent].self, from: data) {
+            self.archivedEvents = decoded
+        } else {
+            // Migrate from old plain string array
+            let oldIDs = defaults.stringArray(forKey: idsKey) ?? []
+            self.archivedEvents = oldIDs.map { ArchivedEvent(id: $0, title: "Archived event") }
+        }
     }
 
     // MARK: - Title (series) archiving
@@ -45,20 +58,21 @@ final class ArchivedEventStore: ObservableObject {
 
     // MARK: - Individual event archiving
 
-    func archiveEvent(id: String) {
-        archivedEventIDs.insert(id)
-        persistIDs()
+    func archiveEvent(id: String, title: String) {
+        guard !archivedEvents.contains(where: { $0.id == id }) else { return }
+        archivedEvents.append(ArchivedEvent(id: id, title: title))
+        persistEvents()
         objectWillChange.send()
     }
 
     func unarchiveEvent(id: String) {
-        archivedEventIDs.remove(id)
-        persistIDs()
+        archivedEvents.removeAll { $0.id == id }
+        persistEvents()
         objectWillChange.send()
     }
 
     func isEventArchived(id: String) -> Bool {
-        archivedEventIDs.contains(id)
+        archivedEvents.contains { $0.id == id }
     }
 
     // MARK: - Filtering
@@ -71,10 +85,14 @@ final class ArchivedEventStore: ObservableObject {
     /// Clears all archived titles and event IDs.
     func clearAll() {
         archivedTitles.removeAll()
-        archivedEventIDs.removeAll()
+        archivedEvents.removeAll()
         persistTitles()
-        persistIDs()
+        persistEvents()
         objectWillChange.send()
+    }
+
+    var hasAny: Bool {
+        !archivedTitles.isEmpty || !archivedEvents.isEmpty
     }
 
     // MARK: - Persistence
@@ -83,7 +101,9 @@ final class ArchivedEventStore: ObservableObject {
         defaults.set(Array(archivedTitles).sorted(), forKey: titlesKey)
     }
 
-    private func persistIDs() {
-        defaults.set(Array(archivedEventIDs).sorted(), forKey: idsKey)
+    private func persistEvents() {
+        if let data = try? JSONEncoder().encode(archivedEvents) {
+            defaults.set(data, forKey: idsKey)
+        }
     }
 }

@@ -50,7 +50,96 @@ struct ComingUpView: View {
             } else {
                 agendaCard
             }
+            archivedSection
         }
+    }
+
+    @State private var showArchived = false
+
+    private var archivedSection: some View {
+        Group {
+            if archivedStore.hasAny {
+                VStack(alignment: .leading, spacing: 0) {
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            showArchived.toggle()
+                        }
+                    } label: {
+                        HStack {
+                            Image(systemName: "archivebox.fill")
+                                .font(.nutola(13, .medium))
+                                .foregroundStyle(Theme.secondary(scheme))
+                            Text("Archived")
+                                .font(.nutola(13, .semibold))
+                                .foregroundStyle(Theme.secondary(scheme))
+                            Spacer()
+                            Text("\(archivedStore.archivedTitles.count + archivedStore.archivedEvents.count)")
+                                .font(.nutola(11))
+                                .foregroundStyle(Theme.tertiary(scheme))
+                            Image(systemName: showArchived ? "chevron.down" : "chevron.right")
+                                .font(.nutola(10))
+                                .foregroundStyle(Theme.tertiary(scheme))
+                        }
+                        .padding(.vertical, 6)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+
+                    if showArchived {
+                        VStack(alignment: .leading, spacing: 4) {
+                            ForEach(Array(archivedStore.archivedTitles).sorted(), id: \.self) { title in
+                                archivedRow(title: title, isSeries: true)
+                            }
+                            ForEach(archivedStore.archivedEvents) { evt in
+                                archivedRow(title: evt.title, isSeries: false, eventID: evt.id)
+                            }
+                            Button(role: .destructive) {
+                                archivedStore.clearAll()
+                                Task { await app.calendar.refreshAgenda() }
+                            } label: {
+                                Label("Clear all", systemImage: "trash")
+                                    .font(.nutola(11))
+                            }
+                            .buttonStyle(.plain)
+                            .foregroundStyle(.red)
+                            .padding(.top, 4)
+                        }
+                        .padding(.top, 4)
+                    }
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
+                .background(Theme.card(scheme), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            }
+        }
+    }
+
+    private func archivedRow(title: String, isSeries: Bool, eventID: String? = nil) -> some View {
+        HStack {
+            Image(systemName: isSeries ? "archivebox.fill" : "archivebox")
+                .font(.nutola(11))
+                .foregroundStyle(Theme.tertiary(scheme))
+            Text(title)
+                .font(.nutola(12))
+                .foregroundStyle(Theme.secondary(scheme))
+                .lineLimit(1)
+            Spacer()
+            Button {
+                if isSeries {
+                    archivedStore.unarchiveTitle(title)
+                } else if let eventID {
+                    archivedStore.unarchiveEvent(id: eventID)
+                }
+                Task { await app.calendar.refreshAgenda() }
+            } label: {
+                Image(systemName: "arrow.up.out.of.square")
+                    .font(.nutola(11))
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(Theme.blueberry)
+            .help("Unarchive")
+        }
+        .padding(.vertical, 2)
     }
 
     private var agendaHeader: some View {
@@ -241,13 +330,13 @@ struct ComingUpView: View {
                 Label("Archive series (hide all \"\(event.title)\")", systemImage: "archivebox.fill")
             }
             Button {
-                archivedStore.archiveEvent(id: event.id)
+                archivedStore.archiveEvent(id: event.id, title: event.title)
                 Task { await app.calendar.refreshAgenda() }
             } label: {
                 Label("Archive this event only", systemImage: "archivebox")
             }
             Divider()
-            if !archivedStore.archivedTitles.isEmpty || !archivedStore.archivedEventIDs.isEmpty {
+            if archivedStore.hasAny {
                 Menu("Archived events") {
                     ForEach(Array(archivedStore.archivedTitles).sorted(), id: \.self) { title in
                         Button {
@@ -257,15 +346,15 @@ struct ComingUpView: View {
                             Label("Unarchive \(title)", systemImage: "arrow.up.out.of.square")
                         }
                     }
-                    if !archivedStore.archivedTitles.isEmpty && !archivedStore.archivedEventIDs.isEmpty {
+                    if !archivedStore.archivedTitles.isEmpty && !archivedStore.archivedEvents.isEmpty {
                         Divider()
                     }
-                    ForEach(Array(archivedStore.archivedEventIDs).sorted(), id: \.self) { id in
+                    ForEach(archivedStore.archivedEvents) { evt in
                         Button {
-                            archivedStore.unarchiveEvent(id: id)
+                            archivedStore.unarchiveEvent(id: evt.id)
                             Task { await app.calendar.refreshAgenda() }
                         } label: {
-                            Label("Unarchive event", systemImage: "arrow.up.out.of.square")
+                            Label("Unarchive \(evt.title)", systemImage: "arrow.up.out.of.square")
                         }
                     }
                     Divider()

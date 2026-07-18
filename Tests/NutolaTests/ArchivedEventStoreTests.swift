@@ -57,7 +57,7 @@ final class ArchivedEventStoreTests: XCTestCase {
     func testArchiveEventByID() {
         let store = makeStore()
         let id = UUID().uuidString
-        store.archiveEvent(id: id)
+        store.archiveEvent(id: id, title: "Test Event")
         XCTAssertTrue(store.isEventArchived(id: id))
         XCTAssertFalse(store.isEventArchived(id: "other"))
     }
@@ -65,7 +65,7 @@ final class ArchivedEventStoreTests: XCTestCase {
     func testUnarchiveEventByID() {
         let store = makeStore()
         let id = UUID().uuidString
-        store.archiveEvent(id: id)
+        store.archiveEvent(id: id, title: "Test Event")
         store.unarchiveEvent(id: id)
         XCTAssertFalse(store.isEventArchived(id: id))
     }
@@ -80,7 +80,7 @@ final class ArchivedEventStoreTests: XCTestCase {
 
     func testIsArchivedByEventID() {
         let store = makeStore()
-        store.archiveEvent(id: "evt-123")
+        store.archiveEvent(id: "evt-123", title: "Some Event")
         XCTAssertTrue(store.isArchived(title: "Other", eventID: "evt-123"))
     }
 
@@ -94,10 +94,10 @@ final class ArchivedEventStoreTests: XCTestCase {
     func testClearAll() {
         let store = makeStore()
         store.archiveTitle("Lunch time")
-        store.archiveEvent(id: "evt-123")
+        store.archiveEvent(id: "evt-123", title: "Some Event")
         store.clearAll()
         XCTAssertTrue(store.archivedTitles.isEmpty)
-        XCTAssertTrue(store.archivedEventIDs.isEmpty)
+        XCTAssertTrue(store.archivedEvents.isEmpty)
         XCTAssertFalse(store.isArchived(title: "Lunch time", eventID: "evt-123"))
     }
 
@@ -113,7 +113,7 @@ final class ArchivedEventStoreTests: XCTestCase {
 
     func testEventIDsPersistAcrossInstances() {
         let store1 = makeStore()
-        store1.archiveEvent(id: "evt-456")
+        store1.archiveEvent(id: "evt-456", title: "Persisted Event")
 
         let store2 = makeStore()
         XCTAssertTrue(store2.isEventArchived(id: "evt-456"))
