@@ -101,7 +101,7 @@ struct CrashHistoryPanel: View {
                 .frame(maxWidth: 320)
         }
         .frame(maxWidth: .infinity)
-        .padding(.vertical, 32)
+        .padding(.vertical, 16)
     }
 
     // MARK: List + detail split

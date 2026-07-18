@@ -962,7 +962,6 @@ private struct DebugSettings: View {
         Form {
             Section("Crashes") {
                 CrashHistoryPanel()
-                    .frame(minHeight: 320)
             }
             Section("Logs") {
                 AIDebugLogPanel()
