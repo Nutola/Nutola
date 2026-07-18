@@ -149,6 +149,7 @@ struct MenuBarView: View {
             Button {
                 dismissMenu()
                 app.openCalendarEvent(event)
+                openMain()
             } label: {
                 HStack(alignment: .top, spacing: 8) {
                     VStack(alignment: .leading, spacing: 1) {
