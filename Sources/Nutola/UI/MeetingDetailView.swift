@@ -68,10 +68,10 @@ struct MeetingDetailView: View {
                         Button {
                             Task { await app.continueRecording(meetingID: meeting.id) }
                         } label: {
-                            Label("Resume recording", systemImage: "mic.fill")
-                                .font(.nutola(13, .semibold))
-                                .padding(.horizontal, 20)
-                                .padding(.vertical, 8)
+                        Label("Resume recording", systemImage: "mic.fill")
+                            .font(.nutola(11, .semibold))
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 5)
                         }
                         .buttonStyle(.borderedProminent)
                         .tint(Theme.mint(scheme))
