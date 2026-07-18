@@ -28,6 +28,22 @@ enum ProcessingPipeline {
         case done
     }
 
+    /// Shared locale-aware formatter for one-decimal second values in log strings,
+    /// replacing `String(format: "%.1f", …)` which ignores the user's locale.
+    private static let decimalFormatter: NumberFormatter = {
+        let f = NumberFormatter()
+        f.minimumFractionDigits = 1
+        f.maximumFractionDigits = 1
+        return f
+    }()
+
+    /// Formats a speaker turn's range as `"name 12.3-45.6"`, locale-aware.
+    private static func formatTurnRange(speaker: String, start: TimeInterval, end: TimeInterval) -> String {
+        let s = decimalFormatter.string(from: NSNumber(value: start)) ?? "\(start)"
+        let e = decimalFormatter.string(from: NSNumber(value: end)) ?? "\(end)"
+        return "\(speaker) \(s)-\(e)"
+    }
+
     static func run(
         meeting: Meeting,
         archive: MeetingArchive,
@@ -168,7 +184,7 @@ enum ProcessingPipeline {
                 namedSpeakers = merged.hasNamedSpeakers
                 outcome.platformSpeakerAttribution = true
                 NutolaConsoleLog.pipeline(
-                    "hybrid timeline: \(merged.turns.map { "\($0.speaker) \(String(format: "%.1f", $0.start))-\(String(format: "%.1f", $0.end))" }.joined(separator: ", "))")
+                    "hybrid timeline: \(merged.turns.map { formatTurnRange(speaker: $0.speaker, start: $0.start, end: $0.end) }.joined(separator: ", "))")
             } else {
                 onProgress("Labeling speakers from Zoom…")
                 turns = PlatformSpeakerTurnBuilder.turns(
@@ -176,7 +192,7 @@ enum ProcessingPipeline {
                 namedSpeakers = true
                 outcome.platformSpeakerAttribution = true
                 NutolaConsoleLog.pipeline(
-                    "using Zoom timeline only: \(turns?.map { "\($0.speaker) \(String(format: "%.1f", $0.start))-\(String(format: "%.1f", $0.end))" }.joined(separator: ", ") ?? "")")
+                    "using Zoom timeline only: \(turns?.map { formatTurnRange(speaker: $0.speaker, start: $0.start, end: $0.end) }.joined(separator: ", ") ?? "")")
             }
         } else if let diarizedTurns {
             turns = diarizedTurns
@@ -339,7 +355,13 @@ enum ProcessingPipeline {
                 summary = try? await AppleSummarizer.summarize(
                     transcript: transcript, filledTemplate: filled)
             }
-            return summary.map { .success($0, provider: "apple") }
+            if let summary {
+                TokenUsageTracker.shared.record(
+                    promptTokens: estimateTokens(transcript + filled),
+                    completionTokens: estimateTokens(summary))
+                return .success(summary, provider: "apple")
+            }
+            return nil
         }
         var claudeError: String?
         var codexError: String?
@@ -361,6 +383,9 @@ enum ProcessingPipeline {
                     result = try await ClaudeCLI.run(
                         prompt: prompt, stdin: transcript, systemPrompt: systemPrompt)
                 }
+                TokenUsageTracker.shared.record(
+                    promptTokens: estimateTokens(prompt + transcript),
+                    completionTokens: estimateTokens(result.text))
                 return .success(result.text, provider: "claude")
             } catch {
                 claudeError = error.localizedDescription
@@ -374,6 +399,9 @@ enum ProcessingPipeline {
                 let result = try await CodexCLI.run(
                     prompt: prompt, stdin: transcript, systemPrompt: systemPrompt)
                 if let onDelta { onDelta(result.text) }
+                TokenUsageTracker.shared.record(
+                    promptTokens: estimateTokens(prompt + transcript),
+                    completionTokens: estimateTokens(result.text))
                 return .success(result.text, provider: "codex")
             } catch {
                 codexError = error.localizedDescription
@@ -482,29 +510,47 @@ enum ProcessingPipeline {
         return .failure("\(reason), and \(cloudName) isn't ready — transcript saved, summary skipped. Fix either one and press Regenerate.")
     }
 
+    /// Cap on summary chars fed to the title-generation prompt — long notes would
+    /// blow the context window without helping the title, and the CLIs charge
+    /// by the token. Was a bare `2000` at both call sites; centralized here.
+    private static let maxTitleSourceChars = 2000
+
     static func generateTitle(summary: String, provider: String) async -> String? {
         NutolaConsoleLog.intelligence("title: generating via \(provider)")
         if provider == "apple", let title = try? await AppleSummarizer.generateTitle(fromSummary: summary) {
             NutolaConsoleLog.intelligence("title: Apple Intelligence → \"\(title)\"")
+            TokenUsageTracker.shared.record(
+                promptTokens: estimateTokens(summary), completionTokens: estimateTokens(title))
             return cleaned(title)
         }
         if provider == "codex", CodexCLI.isInstalled,
            let result = try? await CodexCLI.run(
-               prompt: "Reply with only a specific 3–8 word title for the meeting with these notes, no quotes:\n\n\(String(summary.prefix(2000)))"
+               prompt: "Reply with only a specific 3–8 word title for the meeting with these notes, no quotes:\n\n\(String(summary.prefix(maxTitleSourceChars)))"
            ) {
             NutolaConsoleLog.intelligence("title: Codex → \"\(result.text)\"")
+            TokenUsageTracker.shared.record(
+                promptTokens: estimateTokens(summary), completionTokens: estimateTokens(result.text))
             return cleaned(result.text)
         }
         if ClaudeCLI.isInstalled,
            let result = try? await ClaudeCLI.run(
-               prompt: "Reply with only a specific 3–8 word title for the meeting with these notes, no quotes:\n\n\(String(summary.prefix(2000)))",
+               prompt: "Reply with only a specific 3–8 word title for the meeting with these notes, no quotes:\n\n\(String(summary.prefix(maxTitleSourceChars)))",
                model: "haiku"
            ) {
             NutolaConsoleLog.intelligence("title: Claude → \"\(result.text)\"")
+            TokenUsageTracker.shared.record(
+                promptTokens: estimateTokens(summary), completionTokens: estimateTokens(result.text))
             return cleaned(result.text)
         }
         NutolaConsoleLog.intelligence("title: no engine produced a title")
         return nil
+    }
+
+    /// Rough token estimate shared by the summary/title engines (~4 chars/token,
+    /// the TN3193 heuristic). CLIs don't expose real token counts, so we
+    /// approximate to keep the usage chart populated.
+    private static func estimateTokens(_ text: String) -> Int {
+        max(text.count / 4, 1)
     }
 
     private static func cleaned(_ title: String) -> String? {

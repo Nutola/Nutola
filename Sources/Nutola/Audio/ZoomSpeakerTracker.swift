@@ -11,12 +11,41 @@ final class ZoomSpeakerTracker: PlatformSpeakerTracker, @unchecked Sendable {
     private let startDate: Date
     private let elapsedOffset: TimeInterval
     private let queue = DispatchQueue(label: "io.github.matheusgois-dd.Nutola.zoom-speakers")
+    /// Interval between active-speaker polls (seconds). 400 ms balances responsiveness
+    /// against AX-tree traversal cost on long calls.
+    private static let zoomPollInterval: TimeInterval = 0.4
+    /// Delay before the first poll after `start()` (seconds), letting Zoom settle.
+    private static let zoomPollStartupDelay: TimeInterval = 0.5
+    /// Shared locale-aware formatter for second values in log strings, replacing
+    /// `String(format: "%.1f"/"%.0f", …)` which ignores the user's locale.
+    private static let secondsFormatter: NumberFormatter = {
+        let f = NumberFormatter()
+        f.minimumFractionDigits = 1
+        f.maximumFractionDigits = 1
+        return f
+    }()
+    /// Formats `t` seconds with one decimal, locale-aware.
+    private static func seconds(_ t: TimeInterval) -> String {
+        secondsFormatter.string(from: NSNumber(value: t)) ?? "\(t)"
+    }
+    private static let secondsRoundedFormatter: NumberFormatter = {
+        let f = NumberFormatter()
+        f.maximumFractionDigits = 0
+        f.roundingMode = .halfEven
+        return f
+    }()
+    /// Formats `t` seconds with no decimals, locale-aware.
+    private static func secondsRounded(_ t: TimeInterval) -> String {
+        secondsRoundedFormatter.string(from: NSNumber(value: t)) ?? "\(Int(t))"
+    }
     private var timer: DispatchSourceTimer?
     private var events: [PlatformSpeakerEvent] = []
     private var open: (name: String, start: TimeInterval, source: PlatformSpeakerSource)?
     private var lastPersist = Date.distantPast
     private var lastReportedName: String?
     private var tickCount = 0
+    /// Count of consecutive ticks with no active speaker; surfaced in the periodic
+    /// heartbeat log so a stuck/empty-scan state is visible without a separate probe.
     private var emptyTickStreak = 0
     private var lastSummary = Date.distantPast
     private var lastCaptionKey: String?
@@ -77,9 +106,9 @@ final class ZoomSpeakerTracker: PlatformSpeakerTracker, @unchecked Sendable {
                 NutolaConsoleLog.zoom("start skipped — timer already running")
                 return
             }
-            NutolaConsoleLog.zoom("polling every 400ms")
+            NutolaConsoleLog.zoom("polling every \(Int(Self.zoomPollInterval * 1000))ms")
             let timer = DispatchSource.makeTimerSource(queue: self.queue)
-            timer.schedule(deadline: .now() + 0.5, repeating: 0.4)
+            timer.schedule(deadline: .now() + Self.zoomPollStartupDelay, repeating: Self.zoomPollInterval)
             timer.setEventHandler { [weak self] in self?.tick() }
             timer.resume()
             self.timer = timer
@@ -103,7 +132,7 @@ final class ZoomSpeakerTracker: PlatformSpeakerTracker, @unchecked Sendable {
             }
             let saved = PlatformSpeakerTurnBuilder.normalized(self.events)
             NutolaConsoleLog.zoom(
-                "stop ticks=\(self.tickCount) events=\(saved.count) saved=\(saved.map { "\($0.name) \(String(format: "%.1f", $0.start))-\(String(format: "%.1f", $0.end))" }.joined(separator: ", "))")
+                "stop ticks=\(self.tickCount) events=\(saved.count) saved=\(saved.map { "\($0.name) \(Self.seconds($0.start))-\(Self.seconds($0.end))" }.joined(separator: ", "))")
             Task { @MainActor in self.onActiveSpeaker?(nil) }
         }
     }
@@ -143,11 +172,11 @@ final class ZoomSpeakerTracker: PlatformSpeakerTracker, @unchecked Sendable {
                 events.append(PlatformSpeakerEvent(
                     name: open.name, start: open.start, end: t, source: open.source))
                 NutolaConsoleLog.zoom(
-                    "segment closed \(open.name) \(String(format: "%.1f", open.start))-\(String(format: "%.1f", t))s → now \(primary)")
+                    "segment closed \(open.name) \(Self.seconds(open.start))-\(Self.seconds(t))s → now \(primary)")
                 self.open = (primary, t, source)
             } else if open == nil {
                 open = (primary, t, source)
-                NutolaConsoleLog.zoom("segment opened \(primary) @ \(String(format: "%.1f", t))s (\(source.rawValue))")
+                NutolaConsoleLog.zoom("segment opened \(primary) @ \(Self.seconds(t))s (\(source.rawValue))")
             }
             persist(force: false)
         }
@@ -178,7 +207,7 @@ final class ZoomSpeakerTracker: PlatformSpeakerTracker, @unchecked Sendable {
         if now.timeIntervalSince(lastSummary) >= 5 {
             lastSummary = now
             NutolaConsoleLog.zoom(
-                "heartbeat ticks=\(tickCount) active=\(names.first ?? "none")\(names.count > 1 ? " all=[\(names.joined(separator: ", "))]" : "") roster=\(scan.roster.count) emptyStreak=\(emptyTickStreak) events=\(events.count) elapsed=\(String(format: "%.0f", t))s")
+                "heartbeat ticks=\(tickCount) active=\(names.first ?? "none")\(names.count > 1 ? " all=[\(names.joined(separator: ", "))]" : "") roster=\(scan.roster.count) emptyStreak=\(emptyTickStreak) events=\(events.count) elapsed=\(Self.secondsRounded(t))s")
             if names.isEmpty, !scan.roster.isEmpty {
                 NutolaConsoleLog.zoom(
                     "no active speaker tile — roster: [\(scan.roster.joined(separator: ", "))]")
