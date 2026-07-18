@@ -97,7 +97,7 @@ struct ComingUpView: View {
                                 archivedStore.clearAll()
                                 Task { await app.calendar.refreshAgenda() }
                             } label: {
-                                Label("Clear all", systemImage: "trash")
+                                Label("Unarchive all", systemImage: "arrow.up.out.of.square")
                                     .font(.nutola(11))
                             }
                             .buttonStyle(.plain)
@@ -140,6 +140,18 @@ struct ComingUpView: View {
             .help("Unarchive")
         }
         .padding(.vertical, 2)
+        .contextMenu {
+            Button {
+                if isSeries {
+                    archivedStore.unarchiveTitle(title)
+                } else if let eventID {
+                    archivedStore.unarchiveEvent(id: eventID)
+                }
+                Task { await app.calendar.refreshAgenda() }
+            } label: {
+                Label("Unarchive", systemImage: "arrow.up.out.of.square")
+            }
+        }
     }
 
     private var agendaHeader: some View {
