@@ -13,14 +13,23 @@ struct TranscriptReaderView: View {
 
     @State private var renaming: Speaker?
     @State private var newName = ""
-
+    @State private var searchText = ""
+    @State private var searchMatchCount = 0
     private var turns: [TranscriptTurn] {
         TranscriptTurnBuilder.turns(from: segments)
+    }
+
+    private var filteredTurns: [TranscriptTurn] {
+        TranscriptTurnBuilder.filter(turns: turns, by: searchText)
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             toolbar
+
+            if draft == nil, !segments.isEmpty {
+                searchBar
+            }
 
             if draft != nil {
                 editView
@@ -80,6 +89,38 @@ struct TranscriptReaderView: View {
         return "\(segments.count) segments · \(mins) min"
     }
 
+    private var searchBar: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass")
+                .foregroundStyle(Theme.tertiary(scheme))
+                .font(.system(size: 12))
+            TextField("Search transcript", text: $searchText)
+                .textFieldStyle(.plain)
+                .font(.system(size: 12))
+                .onChange(of: searchText) { _, newValue in
+                    searchMatchCount = TranscriptTurnBuilder.filter(turns: turns, by: newValue).count
+                }
+            if !searchText.isEmpty {
+                Text("\(searchMatchCount) \(searchMatchCount == 1 ? "match" : "matches")")
+                    .font(.nutola(11))
+                    .foregroundStyle(Theme.tertiary(scheme))
+                Button {
+                    searchText = ""
+                    searchMatchCount = 0
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(Theme.tertiary(scheme))
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 7)
+        .background(Theme.card(scheme), in: RoundedRectangle(cornerRadius: 8))
+        .padding(.horizontal, 20)
+        .padding(.bottom, 10)
+    }
+
     private var editView: some View {
         TextEditor(text: Binding(get: { draft ?? "" }, set: { draft = $0 }))
             .font(.system(size: 13, design: .monospaced))
@@ -93,7 +134,7 @@ struct TranscriptReaderView: View {
     private var turnsScroll: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 10) {
-                ForEach(turns) { turn in
+                ForEach(filteredTurns) { turn in
                     TranscriptTurnCard(
                         turn: turn,
                         speakerName: name(for: turn.speakerID),

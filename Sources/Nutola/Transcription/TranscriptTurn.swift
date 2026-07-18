@@ -52,6 +52,13 @@ enum TranscriptTurnBuilder {
         return turns
     }
 
+    /// Returns turns whose text contains `query` (case-insensitive).
+    /// Empty query returns all turns.
+    static func filter(turns: [TranscriptTurn], by query: String) -> [TranscriptTurn] {
+        guard !query.isEmpty else { return turns }
+        return turns.filter { $0.text.localizedCaseInsensitiveContains(query) }
+    }
+
     /// "You" / `isMe` → blueberry; remote speakers get a stable color by first-seen order.
     static func speakerColor(
         speakerID: String,

@@ -92,4 +92,57 @@ enum TranscriptFormatter {
         }
         return (segments, speakers)
     }
+
+    /// SubRip (SRT) subtitles: sequential indices, `HH:MM:SS,mmm --> HH:MM:SS,mmm`
+    /// timestamps, `SpeakerName: text` lines, blank-line-separated entries.
+    static func srt(_ segments: [TranscriptSegment], speakers: [Speaker]) -> String {
+        guard !segments.isEmpty else { return "" }
+        let names = Dictionary(uniqueKeysWithValues: speakers.map { ($0.id, $0.name) })
+        var entries: [String] = []
+        for (i, seg) in segments.enumerated() {
+            let who = names[seg.speakerID] ?? seg.speakerID
+            entries.append("""
+                \(i + 1)
+                \(subtitleTimestamp(seg.start, separator: ",")) --> \(subtitleTimestamp(seg.end, separator: ","))
+                \(who): \(seg.text)
+                """)
+        }
+        return entries.joined(separator: "\n\n")
+    }
+
+    /// WebVTT subtitles: `WEBVTT` header, `HH:MM:SS.mmm --> HH:MM:SS.mmm`
+    /// timestamps, `<v SpeakerName> text` cue lines, blank-line-separated cues.
+    static func vtt(_ segments: [TranscriptSegment], speakers: [Speaker]) -> String {
+        let names = Dictionary(uniqueKeysWithValues: speakers.map { ($0.id, $0.name) })
+        var cues: [String] = []
+        for seg in segments {
+            let who = names[seg.speakerID] ?? seg.speakerID
+            cues.append("""
+                \(subtitleTimestamp(seg.start, separator: ".")) --> \(subtitleTimestamp(seg.end, separator: "."))
+                <v \(who)> \(seg.text)
+                """)
+        }
+        return "WEBVTT\n\n" + cues.joined(separator: "\n\n")
+    }
+
+    /// Formats `seconds` as `HH:MM:SS{separator}mmm` for subtitle timestamps.
+    private static func subtitleTimestamp(_ seconds: TimeInterval, separator: Character) -> String {
+        // Floor the integer part and derive milliseconds from the true remainder
+        // so the two never double-count a rounding carry (e.g. 2.567 → 00:00:02,567,
+        // not 00:00:03,567). When the remainder rounds up to a full second
+        // (e.g. 1.9999 → 00:00:02,000) carry it into the integer part.
+        // Negative times clamp to zero.
+        var floored = max(0, Int(seconds.rounded(.down)))
+        var remainder = max(0, seconds - TimeInterval(floored))
+        var millis = Int((remainder * 1000).rounded())
+        if millis >= 1000 {
+            floored += 1
+            remainder = 0
+            millis = 0
+        }
+        let hours = floored / 3600
+        let minutes = (floored % 3600) / 60
+        let secs = floored % 60
+        return String(format: "%02d:%02d:%02d%@%03d", hours, minutes, secs, String(separator), millis)
+    }
 }
