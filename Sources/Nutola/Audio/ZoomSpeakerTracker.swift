@@ -300,8 +300,18 @@ enum ZoomActiveSpeakerReader {
         "apps", "whiteboards", "you", "me", "host", "co-host", "guest",
     ]
 
+    /// Cached AX-tree signature + result so a steady-state Zoom UI (no tile
+    /// added/removed, no speaker transition) skips the full recursive `walk`
+    /// and returns the last `ScanResult` directly. The signature captures role,
+    /// child count, and title/description of every node (bounded depth), so any
+    /// speaker transition or roster change alters it and forces a fresh scan.
+    private static var lastScanSignature: Int?
+    private static var lastScanResult: ScanResult?
+
     static func scan() -> ScanResult {
         guard AccessibilityPermission.isTrusted else {
+            lastScanSignature = nil
+            lastScanResult = nil
             return ScanResult(
                 zoomPID: nil, roster: [], active: [], activeSource: .activeSpeaker,
                 latestCaption: nil, localParticipantMuted: nil)
@@ -309,12 +319,29 @@ enum ZoomActiveSpeakerReader {
         guard let app = NSWorkspace.shared.runningApplications.first(where: {
             $0.bundleIdentifier == mainBundleID
         }) else {
+            lastScanSignature = nil
+            lastScanResult = nil
             return ScanResult(
                 zoomPID: nil, roster: [], active: [], activeSource: .activeSpeaker,
                 latestCaption: nil, localParticipantMuted: nil)
         }
 
         let root = AXUIElementCreateApplication(app.processIdentifier)
+        // Build the entry-point windows the same way the full scan would, then
+        // hash their subtree shape. A matching signature means the tree is
+        // unchanged since the last poll → return the cached result and skip the
+        // expensive walk + per-node regex parsing.
+        var scannedWindows = allWindows(root)
+        if scannedWindows.isEmpty {
+            if let focused = focusedWindow(root) {
+                scannedWindows = [focused]
+            }
+        }
+        let signature = treeSignature(of: scannedWindows, fallback: root)
+        if signature == lastScanSignature, let cached = lastScanResult {
+            return cached
+        }
+
         var roster: [String] = []
         var activeTiles: [String] = []
         var activeLabels: [String] = []
@@ -327,12 +354,6 @@ enum ZoomActiveSpeakerReader {
         //    another Space — kAXWindowsAttribute returns 0 for inactive Spaces,
         //    but the focused window is still accessible with its full subtree).
         // 3. kAXChildrenAttribute on root — last resort (usually just the menu bar).
-        var scannedWindows = allWindows(root)
-        if scannedWindows.isEmpty {
-            if let focused = focusedWindow(root) {
-                scannedWindows = [focused]
-            }
-        }
         if scannedWindows.isEmpty {
             walk(
                 root, depth: 0, roster: &roster, activeTiles: &activeTiles,
@@ -361,13 +382,46 @@ enum ZoomActiveSpeakerReader {
             activeOut = selectedTiles
             source = .selectedTile
         }
-        return ScanResult(
+        let result = ScanResult(
             zoomPID: app.processIdentifier,
             roster: rosterOut,
             active: deduped(activeOut).filter { !isLocalParticipant($0) },
             activeSource: source,
             latestCaption: latestCaption,
             localParticipantMuted: localMuted)
+        lastScanSignature = signature
+        lastScanResult = result
+        return result
+    }
+
+    /// Cheap structural fingerprint of the Zoom AX subtree rooted at `windows`
+    /// (or `fallback` when there are no windows). Hashes role, child count, and
+    /// the title/description of each node up to a bounded depth — enough that any
+    /// speaker transition (tile gains/loses "active speaker") or roster change
+    /// (tile added/removed) perturbs it, while reading far fewer AX attributes
+    /// than the full `walk()` (which also parses value/selected + runs regexes).
+    private static func treeSignature(of windows: [AXUIElement], fallback: AXUIElement) -> Int {
+        var hasher = Hasher()
+        if windows.isEmpty {
+            hashSubtree(fallback, depth: 0, into: &hasher)
+        } else {
+            for window in windows {
+                hashSubtree(window, depth: 0, into: &hasher)
+            }
+        }
+        return hasher.finalize()
+    }
+
+    private static func hashSubtree(_ element: AXUIElement, depth: Int, into hasher: inout Hasher) {
+        guard depth < 20 else { return }
+        hasher.combine(role(element))
+        hasher.combine(attribute(element, kAXTitleAttribute as CFString) ?? "")
+        hasher.combine(attribute(element, kAXDescriptionAttribute as CFString) ?? "")
+        let kids = children(element)
+        hasher.combine(kids.count)
+        for child in kids {
+            hashSubtree(child, depth: depth + 1, into: &hasher)
+        }
     }
 
     /// Diagnostic: dumps the full Zoom AX tree (first ~500 elements) to the unified
@@ -533,18 +587,8 @@ enum ZoomActiveSpeakerReader {
     static func parseSpeakingLabel(_ raw: String) -> String? {
         let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return nil }
-        let lower = text.lowercased()
-
-        let patterns: [String] = [
-            #"^(.+?),\s*unmuted(?:\s+audio)?$"#,
-            #"^(.+?)\s+is\s+speaking$"#,
-            #"^(.+?)\s+is\s+talking$"#,
-            #"^speaking:\s*(.+)$"#,
-            #"^active\s+speaker:\s*(.+)$"#,
-            #"^(.+?),\s*speaking$"#,
-        ]
-        for pattern in patterns {
-            if let name = firstCapture(pattern: pattern, in: lower, original: text) {
+        for regex in speakingLabelRegexes {
+            if let name = firstCapture(regex: regex, in: text) {
                 return cleaned(name)
             }
         }
@@ -555,14 +599,7 @@ enum ZoomActiveSpeakerReader {
     static func parseZoomCaptionLine(_ raw: String) -> CaptionLine? {
         let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return nil }
-        let patterns = [
-            #"^(.+?)\s+said:\s+(.+)$"#,
-            #"^(.+?):\s+(.+)$"#,
-        ]
-        for pattern in patterns {
-            guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
-                continue
-            }
+        for regex in captionLineRegexes {
             let range = NSRange(text.startIndex..<text.endIndex, in: text)
             guard let match = regex.firstMatch(in: text, range: range),
                   match.numberOfRanges > 2,
@@ -577,6 +614,7 @@ enum ZoomActiveSpeakerReader {
         }
         return nil
     }
+
 
     /// Participants panel rows — plain display names without tile metadata.
     static func parseParticipantRow(_ raw: String) -> String? {
@@ -599,10 +637,30 @@ enum ZoomActiveSpeakerReader {
         return (value as? Bool) == true
     }
 
-    private static func firstCapture(pattern: String, in lower: String, original: String) -> String? {
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
-            return nil
-        }
+    /// Compiled once at type load and reused across every poll (was rebuilt on
+    /// every call — the AX tree fires this hundreds of times per minute).
+    private static let speakingLabelRegexes: [NSRegularExpression] = {
+        let patterns = [
+            #"^(.+?),\s*unmuted(?:\s+audio)?$"#,
+            #"^(.+?)\s+is\s+speaking$"#,
+            #"^(.+?)\s+is\s+talking$"#,
+            #"^speaking:\s*(.+)$"#,
+            #"^active\s+speaker:\s*(.+)$"#,
+            #"^(.+?),\s*speaking$"#,
+        ]
+        return patterns.compactMap { try? NSRegularExpression(pattern: $0, options: [.caseInsensitive]) }
+    }()
+
+    /// Caption-line patterns for `parseZoomCaptionLine`, compiled once at load.
+    private static let captionLineRegexes: [NSRegularExpression] = {
+        let patterns = [
+            #"^(.+?)\s+said:\s+(.+)$"#,
+            #"^(.+?):\s+(.+)$"#,
+        ]
+        return patterns.compactMap { try? NSRegularExpression(pattern: $0, options: [.caseInsensitive]) }
+    }()
+
+    private static func firstCapture(regex: NSRegularExpression, in original: String) -> String? {
         let range = NSRange(original.startIndex..<original.endIndex, in: original)
         guard let match = regex.firstMatch(in: original, range: range),
               match.numberOfRanges > 1,
@@ -672,6 +730,12 @@ enum ZoomActiveSpeakerReader {
         var value: CFTypeRef?
         let err = AXUIElementCopyAttributeValue(app, kAXFocusedWindowAttribute as CFString, &value)
         guard err == .success, let value else { return nil }
-        return value as! AXUIElement
+        // kAXFocusedWindowAttribute returns an AXUIElement, but the CFTypeRef could
+        // hold something else on a rare AX failure — check the CF type ID rather
+        // than force-unwrapping so an unexpected value doesn't crash the poller.
+        // `as?` on a CF toll-free-bridged type is flagged as always-succeeding, so
+        // compare CFTypeIDs explicitly.
+        guard CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
+        return (value as! AXUIElement)
     }
 }
