@@ -86,7 +86,10 @@ struct PrepareMeetingUseCase {
         meeting.calendarEventID = calendarEvent.id
         meeting.calendarEventStart = calendarEvent.start
         meeting.calendarEventEnd = calendarEvent.end
-        meeting.templateName = settings.defaultTemplate
+        meeting.templateName = settings.smartTemplatesEnabled
+            ? MeetingTemplateResolver.templateName(
+                for: MeetingTemplateResolver.resolve(for: meeting))
+            : settings.defaultTemplate
 
         if let title = meeting.calendarEventTitle,
            let folder = folderRepository.folder(forTitle: title) {

@@ -90,6 +90,15 @@ final class RecordingServiceImpl: RecordingService {
             NutolaConsoleLog.recording("matched calendar \"\(resolvedCalendarEvent.title)\" (\(resolvedCalendarEvent.attendees.count) attendees)")
         }
 
+        // Smart templates: once the calendar event (title + attendees) is applied,
+        // override the default template with the one the resolver picks for this
+        // meeting type. Transcript keywords aren't available yet at start time.
+        if settings.smartTemplatesEnabled {
+            let type = MeetingTemplateResolver.resolve(for: meeting)
+            meeting.templateName = MeetingTemplateResolver.templateName(for: type)
+            NutolaConsoleLog.intelligence("smart template → \(type.rawValue) (\"\(meeting.templateName ?? "")\")")
+        }
+
         if let title = meeting.calendarEventTitle,
            let folder = folderRepository.folder(forTitle: title) {
             meeting.folderID = folder.id

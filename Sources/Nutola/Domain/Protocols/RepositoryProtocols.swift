@@ -83,4 +83,7 @@ protocol SettingsRepository: Sendable {
     var preferredAIProvider: AIProvider { get }
     var preferClaudeSummaries: Bool { get }
     var showLiveRecordingCard: Bool { get }
+    /// When true, the meeting template is auto-selected from the detected
+    /// meeting type instead of always using `defaultTemplate`.
+    var smartTemplatesEnabled: Bool { get }
 }
