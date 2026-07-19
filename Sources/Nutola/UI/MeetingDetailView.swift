@@ -33,7 +33,7 @@ struct MeetingDetailView: View {
 
     enum ShareNotesState: Equatable {
         case idle, working
-        case done(URL)
+        case done
         case failed(String)
     }
 
@@ -1015,59 +1015,20 @@ struct MeetingDetailView: View {
                     isPrimary: false
                 ) { saveShareNotesHTML() }
 
-                if GitHubGist.isAvailable {
-                    shareActionCard(
-                        icon: "safari",
-                        title: shareNotesState == .working ? "Publishing…" : "Publish to Gist",
-                        subtitle: "Share via a public link",
-                        isPrimary: true
-                    ) {
-                        if shareNotesState != .working { publishShareNotes() }
-                    }
-                } else {
-                    HStack(spacing: 12) {
-                        Image(systemName: "safari")
-                            .font(.nutola(18, .medium))
-                            .foregroundStyle(Theme.tertiary(scheme))
-                            .frame(width: 36)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Publish to Gist")
-                                .font(.nutola(13, .semibold))
-                            Text("Requires GitHub CLI (gh) to be installed")
-                                .font(.nutola(10))
-                                .foregroundStyle(Theme.tertiary(scheme))
-                        }
-                        Spacer()
-                    }
-                    .padding(12)
-                    .background(Theme.card(scheme).opacity(0.5),
-                               in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-                }
+
             }
 
             // Status
             switch shareNotesState {
             case .idle, .working:
-                if shareNotesState == .working {
-                    HStack(spacing: 6) {
-                        ProgressView().controlSize(.small)
-                        Text("Publishing…")
-                            .font(.nutola(11))
-                            .foregroundStyle(Theme.secondary(scheme))
-                    }
-                }
-            case .done(let url):
+                EmptyView()
+            case .done:
                 HStack(spacing: 8) {
                     Image(systemName: "checkmark.circle.fill")
                         .foregroundStyle(Theme.mint(scheme))
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Published! Link copied to clipboard.")
-                            .font(.nutola(11, .medium))
-                            .foregroundStyle(Theme.mint(scheme))
-                        Link(url.absoluteString, destination: url)
-                            .font(.nutola(11))
-                            .foregroundStyle(Theme.blueberry(scheme))
-                    }
+                    Text("HTML copied to clipboard!")
+                        .font(.nutola(11, .medium))
+                        .foregroundStyle(Theme.mint(scheme))
                     Spacer()
                 }
                 .padding(10)
@@ -1095,7 +1056,7 @@ struct MeetingDetailView: View {
             }
         }
         .padding(24)
-        .frame(width: 440, height: 460)
+        .frame(width: 440, height: 360)
         .onDisappear { shareNotesState = .idle }
     }
 
@@ -1158,6 +1119,7 @@ struct MeetingDetailView: View {
             meeting: m, summary: summary, transcript: turns, actionItems: items)
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(html, forType: .string)
+        shareNotesState = .done
     }
 
     private func saveShareNotesHTML() {
@@ -1169,26 +1131,6 @@ struct MeetingDetailView: View {
         let html = SharedNotesExporter.exportHTML(
             meeting: m, summary: summary, transcript: turns, actionItems: items)
         try? html.data(using: .utf8)?.write(to: dest)
-    }
-
-    private func publishShareNotes() {
-        shareNotesState = .working
-        let (m, summary, turns, items) = sharedNotesInputs()
-        Task {
-            do {
-                let url = try await SharedNotesExporter.publishToGist(
-                    meeting: m, summary: summary, transcript: turns, actionItems: items)
-                if var fresh = app.store.meeting(id: m.id) {
-                    fresh.publishedURL = url.absoluteString
-                    app.store.upsert(fresh)
-                }
-                shareNotesState = .done(url)
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(url.absoluteString, forType: .string)
-            } catch {
-                shareNotesState = .failed(error.localizedDescription)
-            }
-        }
     }
 
     private func previewInBrowser() {
