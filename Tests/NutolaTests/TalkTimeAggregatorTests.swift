@@ -4,7 +4,7 @@ import XCTest
 final class TalkTimeAggregatorTests: XCTestCase {
     // MARK: - Single speaker, single meeting
 
-    func testSingleSpeakerSingleMeeting() {
+    func testSingleSpeakerSingleMeeting() throws {
         let meeting = Meeting(title: "M1", createdAt: Date(), duration: 60)
         let speakers = [Speaker(id: "me", name: "Me", isMe: true)]
         let segments = [
@@ -28,7 +28,7 @@ final class TalkTimeAggregatorTests: XCTestCase {
 
     // MARK: - Multiple speakers aggregated across meetings
 
-    func testMultipleSpeakersAggregated() {
+    func testMultipleSpeakersAggregated() throws {
         let m1 = Meeting(title: "M1", createdAt: Date(), duration: 60)
         let m2 = Meeting(title: "M2", createdAt: Date(), duration: 60)
         let speakers = [
@@ -54,15 +54,17 @@ final class TalkTimeAggregatorTests: XCTestCase {
 
         let byID = Dictionary(uniqueKeysWithValues: summaries.map { ($0.speakerID, $0) })
         XCTAssertEqual(summaries.count, 2)
-        XCTAssertEqual(byID["me"]?.totalTalkTime, 50, accuracy: 0.001)
-        XCTAssertEqual(byID["s1"]?.totalTalkTime, 70, accuracy: 0.001)
-        XCTAssertEqual(byID["me"]?.meetingCount, 2)
-        XCTAssertEqual(byID["s1"]?.meetingCount, 2)
+        let me = try XCTUnwrap(byID["me"])
+        let alice = try XCTUnwrap(byID["s1"])
+        XCTAssertEqual(me.totalTalkTime, 50, accuracy: 0.001)
+        XCTAssertEqual(alice.totalTalkTime, 70, accuracy: 0.001)
+        XCTAssertEqual(me.meetingCount, 2)
+        XCTAssertEqual(alice.meetingCount, 2)
     }
 
     // MARK: - Average per meeting
 
-    func testAvgPerMeeting() {
+    func testAvgPerMeeting() throws {
         let m1 = Meeting(title: "M1", createdAt: Date(), duration: 60)
         let m2 = Meeting(title: "M2", createdAt: Date(), duration: 90)
         let speakers = [Speaker(id: "me", name: "Me", isMe: true)]
@@ -84,7 +86,7 @@ final class TalkTimeAggregatorTests: XCTestCase {
 
     // MARK: - Percentage of total
 
-    func testPercentageOfTotal() {
+    func testPercentageOfTotal() throws {
         let meeting = Meeting(title: "M1", createdAt: Date(), duration: 60)
         let speakers = [
             Speaker(id: "me", name: "Me", isMe: true),
@@ -102,8 +104,11 @@ final class TalkTimeAggregatorTests: XCTestCase {
             speakers: [(meeting.id, speakers)])
 
         let byID = Dictionary(uniqueKeysWithValues: summaries.map { ($0.speakerID, $0) })
-        XCTAssertEqual(byID["me"]?.percentageOfTotal, 25, accuracy: 0.001)
-        XCTAssertEqual(byID["s1"]?.percentageOfTotal, 75, accuracy: 0.001)
+        let me = try XCTUnwrap(byID["me"])
+        let alice = try XCTUnwrap(byID["s1"])
+        XCTAssertEqual(me.percentageOfTotal, 25, accuracy: 0.001)
+        XCTAssertEqual(alice.percentageOfTotal, 75, accuracy: 0.001)
+        // Percentages should sum to 100.
         let total = summaries.reduce(0) { $0 + $1.percentageOfTotal }
         XCTAssertEqual(total, 100, accuracy: 0.001)
     }
@@ -120,7 +125,7 @@ final class TalkTimeAggregatorTests: XCTestCase {
 
     // MARK: - Meeting without transcript is skipped
 
-    func testMeetingWithoutTranscript() {
+    func testMeetingWithoutTranscript() throws {
         let m1 = Meeting(title: "M1", createdAt: Date(), duration: 60)
         let m2 = Meeting(title: "M2", createdAt: Date(), duration: 0)
         let speakers = [Speaker(id: "me", name: "Me", isMe: true)]
