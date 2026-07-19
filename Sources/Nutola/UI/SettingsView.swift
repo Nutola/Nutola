@@ -424,6 +424,11 @@ private struct CalendarSettings: View {
                                 .foregroundStyle(Theme.blueberry)
                                 .help("Unarchive series")
                             }
+                            .contentShape(Rectangle())
+                            .onTapGesture(count: 2) {
+                                archivedStore.unarchiveTitle(title)
+                                Task { await app.calendar.refreshAgenda() }
+                            }
                         }
                         ForEach(archivedStore.archivedEvents) { evt in
                             HStack {
@@ -440,15 +445,22 @@ private struct CalendarSettings: View {
                                 .foregroundStyle(Theme.blueberry)
                                 .help("Unarchive event")
                             }
+                            .contentShape(Rectangle())
+                            .onTapGesture(count: 2) {
+                                archivedStore.unarchiveEvent(id: evt.id)
+                                Task { await app.calendar.refreshAgenda() }
+                            }
                         }
                         Divider()
-                        Button(role: .destructive) {
+                        Button {
                             archivedStore.clearAll()
                             Task { await app.calendar.refreshAgenda() }
                         } label: {
-                            Label("Clear all archived", systemImage: "trash")
+                            Label("Unarchive all", systemImage: "arrow.up.out.of.square")
                                 .font(.nutola(11))
                         }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(Theme.blueberry)
                     }
                 }
             }
