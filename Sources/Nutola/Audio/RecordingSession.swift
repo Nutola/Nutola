@@ -37,6 +37,10 @@ final class RecordingSession: ObservableObject {
     /// (both mic and system file are zero bytes), so the UI can warn the user
     /// their microphone and system audio settings need checking.
     @Published private(set) var stopNotice: String?
+    /// Bookmarks dropped during recording via the ⌃⌥B hotkey or the
+    /// "Hey Nutola, mark this" voice trigger. Mirrored from the shared
+    /// `TranscriptMarkerStore` so the live UI badges turns in real time.
+    @Published private(set) var markers: [TranscriptMarker] = []
     private(set) var micStarted = false
     private(set) var systemStarted = false
     /// True when the local participant is muted in Zoom — the mic buffer sink is
@@ -75,6 +79,21 @@ final class RecordingSession: ObservableObject {
         self.elapsedOffset = elapsedOffset
         self.sourceApp = sourceApp
     }
+
+    /// Drop a bookmark at the current recording timestamp. Called by the
+ /// ⌃⌥B hotkey (or the "Hey Nutola, mark this" voice trigger) while
+ /// recording. The label is stored on the marker and the marker is
+ /// mirrored to the shared `TranscriptMarkerStore` so the transcript reader
+ /// badges the nearest turn.
+ func addMarker(label: String = "Bookmark") {
+     TranscriptMarkerStore.shared.add(
+         meetingID: meetingID,
+         timestamp: elapsed,
+         label: label)
+     markers = TranscriptMarkerStore.shared.markers(for: meetingID)
+     NutolaConsoleLog.recording(
+         "marker added at \(Int(elapsed))s label=\"\(label)\" meeting=\(meetingID.uuidString.prefix(8))")
+ }
 
     func start(micURL: URL, systemURL: URL) throws {
         MicRecorder.logAudioDeviceSnapshot(context: "session start")
