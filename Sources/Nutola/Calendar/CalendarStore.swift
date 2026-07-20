@@ -104,7 +104,7 @@ final class CalendarStore: ObservableObject {
             if enabledCalendars?.isEmpty == true { return nil }
             let predicate = eventStore.predicateForEvents(
                 withStart: now.addingTimeInterval(-4 * 3600),
-                end: now.addingTimeInterval(60),
+                end: now.addingTimeInterval(10 * 60),
                 calendars: enabledCalendars)
             let events = eventStore.events(matching: predicate)
             guard let selected = CalendarEventSelector.select(from: events, at: now, sourceApp: sourceApp)
