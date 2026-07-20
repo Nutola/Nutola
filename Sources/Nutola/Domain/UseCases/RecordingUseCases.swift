@@ -10,6 +10,8 @@ struct StartRecordingUseCase {
     let folderRepository: FolderRepository
     let calendarRepository: CalendarRepository
     let settings: SettingsRepository
+    let templateOverrides: TemplateOverrideRepository
+    let availableTemplateNames: () -> [String]
 
     func execute(
         sourceApp: String? = nil,
@@ -21,7 +23,9 @@ struct StartRecordingUseCase {
             meetingRepository: meetingRepository,
             folderRepository: folderRepository,
             calendarRepository: calendarRepository,
-            settings: settings)
+            settings: settings,
+            templateOverrides: templateOverrides,
+            availableTemplateNames: availableTemplateNames)
     }
 }
 
@@ -77,6 +81,8 @@ struct PrepareMeetingUseCase {
     let meetingRepository: MeetingRepository
     let folderRepository: FolderRepository
     let settings: SettingsRepository
+    let templateOverrides: TemplateOverrideRepository
+    let availableTemplateNames: () -> [String]
 
     func execute(calendarEvent: CalendarEventSummary) -> Result<Meeting, RecordingError> {
         var meeting = Meeting(title: calendarEvent.title, createdAt: Date())
@@ -90,6 +96,11 @@ struct PrepareMeetingUseCase {
             ? MeetingTemplateResolver.templateName(
                 for: MeetingTemplateResolver.resolve(for: meeting))
             : settings.defaultTemplate
+        // Per-event override wins over both the default and the smart template.
+        if let override = templateOverrides.templateName(
+            forEventID: calendarEvent.id, available: availableTemplateNames()) {
+            meeting.templateName = override
+        }
 
         if let title = meeting.calendarEventTitle,
            let folder = folderRepository.folder(forTitle: title) {

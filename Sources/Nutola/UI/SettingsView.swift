@@ -970,6 +970,7 @@ private struct TemplateSettings: View {
     @State private var deleteError: String?
     @State private var showAISheet = false
     @State private var aiPrompt = ""
+    @State private var aiError: String?
     @State private var isGenerating = false
 
     var body: some View {
@@ -1014,7 +1015,7 @@ private struct TemplateSettings: View {
                     .disabled(selected == nil)
                     .help("Delete template")
                     Button {
-                        showAISheet = true
+                        aiError = nil; showAISheet = true
                     } label: {
                         Image(systemName: "sparkles")
                     }
@@ -1047,7 +1048,7 @@ private struct TemplateSettings: View {
                         }
                         Spacer()
                         Button {
-                            showAISheet = true
+                            aiError = nil; showAISheet = true
                         } label: {
                             Label("Generate with AI", systemImage: "sparkles")
                                 .font(.nutola(12, .medium))
@@ -1099,8 +1100,8 @@ private struct TemplateSettings: View {
                 .font(.nutola(10))
                 .foregroundStyle(.secondary)
             HStack {
-                if let deleteError {
-                    Label(deleteError, systemImage: "exclamationmark.triangle")
+                if let aiError {
+                    Label(aiError, systemImage: "exclamationmark.triangle")
                         .font(.nutola(11))
                         .foregroundStyle(.orange)
                 }
@@ -1118,9 +1119,12 @@ private struct TemplateSettings: View {
     }
 
     private func generateTemplate() {
+        let promptText = aiPrompt.trimmingCharacters(in: .whitespaces)
+        guard !promptText.isEmpty else { return }
+        aiError = nil
         isGenerating = true
         let prompt = """
-        Create a meeting notes template in Markdown. \(aiPrompt)
+        Create a meeting notes template in Markdown. \(promptText)
         Use these placeholders: {{title}} {{date}} {{attendees}} {{duration}} {{app}}.
         Use ## headings to guide the AI summarizer — text under a heading tells it what belongs there.
         Return ONLY the markdown template, no explanation.
@@ -1128,21 +1132,39 @@ private struct TemplateSettings: View {
         Task {
             do {
                 let result = try await AIAsk.answer(prompt: prompt)
-                let name = "AI: \(String(aiPrompt.prefix(30)).trimmingCharacters(in: .whitespaces))"
-                try app.templates.save(SummaryTemplate(name: name, body: result))
+                // Sanitize the prompt into a valid template name — TemplateStore
+                // rejects "/" and ":" (used as path separators), and we prefix
+                // with "AI " so generated templates group together in the list.
+                var raw = String(promptText.prefix(40)).trimmingCharacters(in: .whitespaces)
+                raw = raw.replacingOccurrences(of: "/", with: "-")
+                    .replacingOccurrences(of: ":", with: "-")
+                    .replacingOccurrences(of: "\n", with: " ")
+                let baseName = raw.isEmpty ? "AI Template" : "AI - \(raw)"
+                let finalName = nextUniqueTemplateName(baseName)
+                try app.templates.save(SummaryTemplate(name: finalName, body: result))
                 await MainActor.run {
                     isGenerating = false
                     showAISheet = false
                     aiPrompt = ""
-                    reload(select: name)
+                    reload(select: finalName)
                 }
             } catch {
                 await MainActor.run {
                     isGenerating = false
-                    deleteError = error.localizedDescription
+                    aiError = error.localizedDescription
                 }
             }
         }
+    }
+
+    /// Returns `baseName`, or `baseName 2`, `baseName 3`, … — whatever isn't
+    /// already in `templates`. Avoids TemplateError.nameTaken on AI generation.
+    private func nextUniqueTemplateName(_ baseName: String) -> String {
+        let existing = Set(templates.map { $0.name.lowercased() })
+        guard existing.contains(baseName.lowercased()) else { return baseName }
+        var n = 2
+        while existing.contains("\(baseName) \(n)".lowercased()) { n += 1 }
+        return "\(baseName) \(n)"
     }
 
     private func reload(select: String?) {

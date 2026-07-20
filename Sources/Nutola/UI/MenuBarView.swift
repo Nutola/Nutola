@@ -314,10 +314,7 @@ struct MenuBarView: View {
     }
 
     private func dismissMenu() {
-        app.menuBarInserted = false
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-            app.menuBarInserted = true
-        }
+        MenuBarExtraPanel.dismiss()
     }
 
     private func openMain() {
