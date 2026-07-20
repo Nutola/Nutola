@@ -62,6 +62,7 @@ final class RecordingServiceImpl: RecordingService {
       calendarEvent: calendarEvent,
       sourceApp: sourceApp,
       calendarRepository: calendarRepository,
+      meetingRepository: meetingRepository,
       settings: settings)
 
     // Resume an existing meeting for this calendar event (e.g. re-joining a call
@@ -306,11 +307,44 @@ final class RecordingServiceImpl: RecordingService {
     calendarEvent: CalendarEventSummary?,
     sourceApp: String?,
     calendarRepository: CalendarRepository,
+    meetingRepository: MeetingRepository,
     settings: SettingsRepository
   ) async -> CalendarEventSummary? {
     if let calendarEvent { return calendarEvent }
     guard settings.useCalendar, CalendarAuthorization.isAuthorized else { return nil }
-    return await calendarRepository.currentEvent(at: .now, sourceApp: sourceApp)
+    if let current = await calendarRepository.currentEvent(at: .now, sourceApp: sourceApp) {
+      return current
+    }
+    // Fallback: detection fired slightly before the calendar event's start
+    // (the user joined the call early, or the event starts in a few minutes).
+    // `currentEvent` only looks 10 min forward; a prep meeting created from
+    // the Coming Up view still has the event's real start, so reuse it and
+    // avoid creating a duplicate recording entry with no calendar link.
+    let now = Date()
+    let candidates = meetingRepository.meetings.filter { meeting in
+      guard meeting.state == .prep,
+            meeting.calendarEventID != nil,
+            let start = meeting.calendarEventStart
+      else { return false }
+      return abs(start.timeIntervalSince(now)) <= 15 * 60
+    }
+    if let prep = candidates.first,
+       let id = prep.calendarEventID,
+       let start = prep.calendarEventStart,
+       let end = prep.calendarEventEnd {
+      return CalendarEventSummary(
+        id: id,
+        title: prep.calendarEventTitle ?? prep.title,
+        start: start,
+        end: end,
+        location: nil,
+        attendees: prep.attendees,
+        conferenceURL: nil,
+        calendarID: nil,
+        calendarTitle: nil,
+        calendarColor: .gray)
+    }
+    return nil
   }
 
   private func applyCalendarEvent(_ event: CalendarEventSummary, to meeting: inout Meeting) {

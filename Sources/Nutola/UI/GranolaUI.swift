@@ -252,11 +252,36 @@ struct GranolaFloatingPanel: View {
       if isLive, let session = app.session {
         LiveLocaleMenu(session: session, store: app.localeOverrides)
       }
+      if isLive || !segments.isEmpty {
+        Button {
+          copyTranscript()
+        } label: {
+          Image(systemName: "doc.on.doc")
+            .font(.system(size: 11))
+            .foregroundStyle(Theme.secondary(scheme))
+        }
+        .buttonStyle(.plain)
+        .help("Copy transcript")
+      }
       collapseButton
     }
     .padding(.horizontal, 16)
     .padding(.vertical, 10)
     .overlay(alignment: .bottom) { Divider().opacity(0.3) }
+  }
+
+  /// Copies the full transcript to the pasteboard — both prior (finalized)
+  /// and live segments, formatted as "Speaker: text" lines.
+  private func copyTranscript() {
+    let prior = TranscriptTurnBuilder.turns(from: segments)
+    let live = TranscriptTurnBuilder.turns(from: app.session?.liveSegments ?? [])
+    let all = prior + live
+    guard !all.isEmpty else { return }
+    let text = all.map { turn in
+      "\(LiveTranscriber.name(for: turn.speakerID)): \(turn.text)"
+    }.joined(separator: "\n")
+    NSPasteboard.general.clearContents()
+    NSPasteboard.general.setString(text, forType: .string)
   }
 
   private func presentTranscriptSearch() {
