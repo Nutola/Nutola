@@ -27,6 +27,7 @@ final class AppState: NSObject, ObservableObject {
   var localeOverrides: TranscriptionLocaleStore { container.localeOverrideStore }
   var calendar: CalendarStore { container.calendarStore }
   var folders: MeetingFolderStore { container.folderStore }
+  var tracker: TaskTrackerStore { container.taskTracker }
 
   @Published private(set) var session: RecordingSession?
   @Published private(set) var recordingMeeting: Meeting?
@@ -112,6 +113,16 @@ final class AppState: NSObject, ObservableObject {
     templateOverrides.objectWillChange
       .sink { [weak self] _ in self?.objectWillChange.send() }
       .store(in: &cancellables)
+    tracker.objectWillChange
+      .sink { [weak self] _ in self?.objectWillChange.send() }
+      .store(in: &cancellables)
+    store.onSummarySaved = { [weak self] meetingID, markdown in
+      guard let self, let meeting = self.store.meeting(id: meetingID) else { return }
+      self.tracker.syncFromMeeting(meeting, summary: markdown)
+    }
+    store.onMeetingDeleted = { [weak self] meetingID in
+      self?.tracker.removeTasks(forMeetingID: meetingID)
+    }
   }
 
   private func wireUseCaseCallbacks() {
@@ -374,6 +385,19 @@ final class AppState: NSObject, ObservableObject {
 
   func retry(meetingID: UUID) async {
     await container.retryMeeting.execute(meetingID: meetingID)
+  }
+
+  func importAudio(fileURL: URL, title: String? = nil) async -> UUID? {
+    lastError = nil
+    do {
+      let id = try await container.importAudio.execute(fileURL: fileURL, title: title)
+      openMeetingID = id
+      return id
+    } catch {
+      lastError = error.localizedDescription
+      NutolaConsoleLog.processing("import audio failed — \(error.localizedDescription)")
+      return nil
+    }
   }
 
   func regenerateSummary(

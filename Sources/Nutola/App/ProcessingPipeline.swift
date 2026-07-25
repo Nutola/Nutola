@@ -217,6 +217,17 @@ enum ProcessingPipeline {
         //    first time if there was no draft).
         onProgress("Summarizing…")
         let accurateText = TranscriptFormatter.plainText(mergedSegments, speakers: labeled.speakers)
+        // Optional transcript cleanup applies ONLY to the text we send the
+        // summarizer — the saved transcript stays verbatim so the user's record
+        // is faithful. Filler removal + personal dictionary substitutions.
+        var summaryText = accurateText
+        if AppSettings.fillerRemoval {
+            summaryText = FillerWordRemover.clean(summaryText)
+        }
+        let dictionary = PersonalDictionaryStore()
+        if dictionary.hasAny {
+            summaryText = dictionary.apply(to: summaryText)
+        }
         let finalOutcome: SummaryOutcome
         if let draft, priorSegments.isEmpty, sameContent(liveSegments, segments) {
             // The accurate transcript carries the same words as the live one, so the
@@ -226,12 +237,12 @@ enum ProcessingPipeline {
             // Improve quietly: the draft stays on screen (badge: "Draft · improving")
             // and is replaced atomically when the better version lands.
             finalOutcome = await summarize(
-                meeting: labeled, transcript: accurateText, userNotes: userNotes)
+                meeting: labeled, transcript: summaryText, userNotes: userNotes)
         } else {
             // No draft — stream the sole pass into the notes.
             onSummary(.streaming(""))
             finalOutcome = await summarize(
-                meeting: labeled, transcript: accurateText, userNotes: userNotes,
+                meeting: labeled, transcript: summaryText, userNotes: userNotes,
                 onDelta: { onSummary(.streaming($0)) })
         }
 
@@ -245,8 +256,17 @@ enum ProcessingPipeline {
             // Edit-guard: if the user edited the draft while we were transcribing,
             // keep their version rather than clobbering it with the improvement.
             if draft == nil || archive.summary(for: id) == draft?.text {
-                try? archive.saveSummary(summary, for: id)
-                savedSummary = summary
+                // Annotate the notes with Zoom participants who joined but weren't
+                // on the calendar invite — the call host can see who actually
+                // showed up even when the invite didn't list them. Only when the
+                // roster has names and extras exist; otherwise no-op.
+                let annotated = AdditionalParticipantsAnnotator.annotation(
+                    roster: roster,
+                    attendees: meeting.attendees)
+                    .map { summary + "\n\n" + $0 }
+                    ?? summary
+                try? archive.saveSummary(annotated, for: id)
+                savedSummary = annotated
                 outcome.summaryProvider = provider
             }
         case .failure(let why):

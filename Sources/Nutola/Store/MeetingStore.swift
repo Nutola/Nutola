@@ -15,6 +15,13 @@ final class MeetingStore: ObservableObject {
     let archive: MeetingArchive
     @Published private(set) var meetings: [Meeting] = []
 
+    /// Hook fired after a summary is saved, carrying the meeting id and
+    /// the new markdown. Wired by `AppState` to sync action items into the
+    /// task tracker. Kept as a plain closure (not a protocol) so `MeetingStore`
+    /// stays decoupled from the tracker layer.
+    var onSummarySaved: ((UUID, String) -> Void)?
+    var onMeetingDeleted: ((UUID) -> Void)?
+
     init(archive: MeetingArchive = MeetingArchive()) {
         self.archive = archive
         reload()
@@ -54,6 +61,7 @@ final class MeetingStore: ObservableObject {
     func delete(id: UUID) {
         try? archive.delete(id: id)
         meetings.removeAll { $0.id == id }
+        onMeetingDeleted?(id)
     }
 
     func transcript(for id: UUID) -> [TranscriptSegment] { archive.transcript(for: id) }
@@ -66,6 +74,7 @@ final class MeetingStore: ObservableObject {
 
     func saveSummary(_ markdown: String, for id: UUID) {
         try? archive.saveSummary(markdown, for: id)
+        onSummarySaved?(id, markdown)
     }
 
     /// Search across all meetings' transcripts and summaries for a query.
@@ -103,5 +112,57 @@ final class MeetingStore: ObservableObject {
         guard let i = m.speakers.firstIndex(where: { $0.id == speakerID }) else { return }
         m.speakers[i].name = newName
         upsert(m)
+    }
+
+    /// Rename every speaker whose display name matches `fromName` (case-insensitive,
+    /// whitespace-normalized — the same rule `TalkTimeAggregator.nameKey` uses) to
+    /// `toName`, across ALL meetings. This is the engine behind the insights
+    /// dashboard's "Rename" and "Merge with…" actions.
+    ///
+    /// Within a single meeting, multiple distinct speaker IDs may all carry the
+    /// same display name (rare but possible after a rename). They all get the new
+    /// name. The `speakerID` on each transcript segment is NOT changed — the IDs
+    /// stay stable, only the display name is rewritten. Aggregation will still
+    /// merge them because it keys on the (now identical) display name.
+    ///
+    /// `toName` is taken verbatim. Returns the number of meetings touched.
+    @discardableResult
+    func bulkRenameSpeakers(from fromName: String, to toName: String) -> Int {
+        let target = toName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let source = fromName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !target.isEmpty, !source.isEmpty else { return 0 }
+        // No-op only when the raw (trimmed) display strings are identical —
+        // case/whitespace-only differences (e.g. "alice" → "Alice") still
+        // apply so the user can fix capitalization.
+        guard source != target else { return 0 }
+        let fromKey = Self.nameKey(fromName)
+
+        var touched = 0
+        for candidate in meetings {
+            guard candidate.speakers.contains(where: { Self.nameKey($0.name) == fromKey }) else { continue }
+            guard var updated = self.meeting(id: candidate.id) else { continue }
+            var changed = false
+            for i in updated.speakers.indices {
+                if Self.nameKey(updated.speakers[i].name) == fromKey {
+                    updated.speakers[i].name = target
+                    changed = true
+                }
+            }
+            if changed {
+                upsert(updated)
+                touched += 1
+            }
+        }
+        return touched
+    }
+
+    /// Same normalization as `TalkTimeAggregator.nameKey`. Duplicated locally
+    /// to keep `MeetingStore` decoupled from the Intelligence layer.
+    private static func nameKey(_ name: String) -> String {
+        name.lowercased()
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .components(separatedBy: .whitespaces)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
     }
 }

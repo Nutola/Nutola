@@ -43,6 +43,7 @@ enum NutolaConsoleLog {
 
     private static func emit(_ logger: Logger, _ category: String, _ message: String) {
         logger.info("\(message, privacy: .public)")
+        NutolaFileLog.log(category, message)
         mirror(category, message)
     }
 

@@ -36,6 +36,7 @@ private struct GeneralSettings: View {
     @AppStorage(SettingsKey.autoRecord) private var autoRecord = false
     @AppStorage(SettingsKey.autoStopRecording) private var autoStopRecording = true
     @AppStorage(SettingsKey.identifySpeakers) private var identifySpeakers = true
+    @AppStorage(SettingsKey.fillerRemoval) private var fillerRemoval = false
     @AppStorage(SettingsKey.showLiveRecordingCard) private var showLiveRecordingCard = true
     @AppStorage(SettingsKey.defaultTemplate) private var defaultTemplate = "Meeting Notes"
     @AppStorage(SettingsKey.systemAudioConfirmed) private var systemAudioConfirmed = false
@@ -105,6 +106,10 @@ private struct GeneralSettings: View {
             Section("Understanding") {
                 Toggle("Identify individual speakers", isOn: $identifySpeakers)
                 Text("Separates different voices on the call using a small on-device model (~22 MB, downloaded once).")
+                    .font(.nutola(11))
+                    .foregroundStyle(.secondary)
+                Toggle("Remove filler words", isOn: $fillerRemoval)
+                Text("Strips \"uh\", \"um\", \"er\", \"hmm\" and other disfluencies from the text used to generate notes. The saved transcript stays verbatim.")
                     .font(.nutola(11))
                     .foregroundStyle(.secondary)
                 Picker("Default template", selection: $defaultTemplate) {
@@ -1304,9 +1309,38 @@ private struct DebugSettings: View {
             Section("Logs") {
                 AIDebugLogPanel()
                     .frame(minHeight: 320)
+                HStack {
+                    Text("Persisted logs are at ~/Library/Application Support/Nutola/Logs")
+                        .font(.nutola(11))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Export Logs") { exportLogs() }
+                        .buttonStyle(.plain)
+                        .font(.nutola(11))
+                        .foregroundStyle(Theme.blueberry)
+                    Button("Reveal in Finder") { revealLogs() }
+                        .buttonStyle(.plain)
+                        .font(.nutola(11))
+                        .foregroundStyle(Theme.blueberry)
+                }
             }
         }
         .formStyle(.grouped)
+    }
+
+    private func exportLogs() {
+        let text = NutolaFileLog.exportAll()
+        guard !text.isEmpty else { return }
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = "nutola-logs-\(Int(Date().timeIntervalSince1970)).txt"
+        panel.allowedContentTypes = [.plainText]
+        if panel.runModal() == .OK, let url = panel.url {
+            try? text.write(to: url, atomically: true, encoding: .utf8)
+        }
+    }
+
+    private func revealLogs() {
+        NSWorkspace.shared.activateFileViewerSelecting([NutolaFileLog.logDirectoryURL])
     }
 }
 

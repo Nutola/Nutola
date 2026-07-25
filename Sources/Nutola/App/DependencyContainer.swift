@@ -11,6 +11,7 @@ final class DependencyContainer {
   let templateRepository: TemplateRepository
   let templateOverrideRepository: TemplateOverrideRepository
   let localeStore: TranscriptionLocaleStore
+  let taskTracker: TaskTrackerStore
   let settings: SettingsRepository
 
   let recordingService: RecordingService
@@ -27,6 +28,7 @@ final class DependencyContainer {
   let processMeeting: ProcessMeetingUseCase
   let regenerateSummary: RegenerateSummaryUseCase
   let retryMeeting: RetryMeetingUseCase
+  let importAudio: ImportAudioUseCase
 
   let detectionCoordinator: MeetingDetectionCoordinator
 
@@ -46,6 +48,7 @@ final class DependencyContainer {
     templateStore: TemplateStore? = nil,
     templateOverrideStore: TemplateOverrideStore? = nil,
     localeStore: TranscriptionLocaleStore? = nil,
+    taskTracker: TaskTrackerStore? = nil,
     settings: SettingsRepository = UserDefaultsSettingsRepository(),
     recordingService: RecordingService? = nil,
     processingService: ProcessingService = ProcessingServiceImpl(),
@@ -59,6 +62,7 @@ final class DependencyContainer {
       templateStore: templateStore ?? TemplateStore(),
       templateOverrideStore: templateOverrideStore ?? TemplateOverrideStore(),
       localeStore: localeStore ?? TranscriptionLocaleStore(),
+      taskTracker: taskTracker ?? TaskTrackerStore(),
       settings: settings,
       recordingService: recordingService,
       processingService: processingService,
@@ -73,6 +77,7 @@ final class DependencyContainer {
     templateStore: TemplateStore,
     templateOverrideStore: TemplateOverrideStore,
     localeStore: TranscriptionLocaleStore,
+    taskTracker: TaskTrackerStore,
     settings: SettingsRepository,
     recordingService: RecordingService?,
     processingService: ProcessingService,
@@ -85,6 +90,7 @@ final class DependencyContainer {
     self.templateOverrideRepository = templateOverrideStore
     self.calendarRepository = calendarStore
     self.localeStore = localeStore
+    self.taskTracker = taskTracker
     self.settings = settings
     let recordingService = recordingService ?? RecordingServiceImpl()
     if let impl = recordingService as? RecordingServiceImpl {
@@ -139,6 +145,11 @@ final class DependencyContainer {
       meetingRepository: meetingRepository,
       processMeeting: processUC,
       regenerateSummary: regenerateSummary)
+    self.importAudio = ImportAudioUseCase(
+      meetingRepository: meetingRepository,
+      folderRepository: folderRepository,
+      processMeeting: processUC,
+      settings: settings)
 
     self.detectionCoordinator = MeetingDetectionCoordinator(
       detectionService: detectionService,

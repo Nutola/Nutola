@@ -47,11 +47,27 @@ struct ConferenceVideoIcon: View {
 
 struct ConferenceJoinButton: View {
     @Environment(\.colorScheme) private var scheme
+    @EnvironmentObject private var app: AppState
     let label: String
     let url: URL
     var prominent: Bool = false
+    /// When non-nil, the button becomes a split button: primary "Join & Record"
+    /// starts a recording for this calendar event AND opens the conference URL;
+    /// the menu also offers "Join only" (plain open) and "Record only"
+    /// (starts recording without joining). nil = the legacy single-action button.
+    var calendarEvent: CalendarEventSummary? = nil
 
     var body: some View {
+        Group {
+            if let event = calendarEvent {
+                splitButton(for: event)
+            } else {
+                singleButton
+            }
+        }
+    }
+
+    private var singleButton: some View {
         Group {
             if prominent {
                 Button {
@@ -82,6 +98,61 @@ struct ConferenceJoinButton: View {
                 .controlSize(.regular)
             }
         }
+    }
+
+    /// Split button: primary "Join & Record" opens the conference and starts a
+    /// calendar-linked recording in one tap. The chevron opens a menu with the
+    /// plain "Join only" and "Record only" alternatives so the user keeps the
+    /// single-tap convenience without losing the original behavior.
+    private func splitButton(for event: CalendarEventSummary) -> some View {
+        HStack(spacing: 0) {
+            Button {
+                joinAndRecord(event)
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "video.fill")
+                        .font(.system(size: prominent ? 14 : 11, weight: .semibold))
+                    if prominent {
+                        Text("Join & Record")
+                            .font(.nutola(14, .semibold))
+                    }
+                }
+                .foregroundStyle(Color.white)
+                .padding(.horizontal, prominent ? 16 : 10)
+                .padding(.vertical, prominent ? 10 : 6)
+            }
+            .buttonStyle(.plain)
+            .background(Theme.blueberry(scheme), in: RoundedRectangle(cornerRadius: 6))
+            .disabled(app.isRecording)
+            .help(app.isRecording
+                  ? "A recording is already in progress"
+                  : "Open the meeting and start recording")
+
+            Menu {
+                Button("Join only") { ConferenceJoiner.open(url) }
+                Button {
+                    Task { await app.startRecording(calendarEvent: event) }
+                } label: {
+                    Label("Record only", systemImage: "record.circle")
+                }
+                .disabled(app.isRecording)
+            } label: {
+                Image(systemName: "chevron.down")
+                    .font(.system(size: prominent ? 14 : 11, weight: .semibold))
+                    .foregroundStyle(Color.white)
+                    .frame(width: prominent ? 32 : 24,
+                           height: prominent ? 32 : 24)
+                    .contentShape(Rectangle())
+            }
+            .menuIndicator(.hidden)
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+        }
+    }
+
+    private func joinAndRecord(_ event: CalendarEventSummary) {
+        ConferenceJoiner.open(url)
+        Task { await app.startRecording(calendarEvent: event) }
     }
 }
 
