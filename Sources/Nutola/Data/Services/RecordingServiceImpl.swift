@@ -135,7 +135,7 @@ final class RecordingServiceImpl: RecordingService {
 
     guard !isRecording else { return .failure(.alreadyRecording) }
 
-    return startSession(for: meeting, meetingRepository: meetingRepository)
+    return await startSession(for: meeting, meetingRepository: meetingRepository)
   }
 
   func continueRecording(
@@ -210,7 +210,7 @@ final class RecordingServiceImpl: RecordingService {
       elapsedOffset: meeting.duration,
       sourceApp: meeting.sourceApp)
     do {
-      try newSession.start(
+      try await newSession.startAsync(
         micURL: archive.micURL(for: meeting.id),
         systemURL: archive.systemURL(for: meeting.id),
         localeStore: localeStore)
@@ -263,7 +263,7 @@ final class RecordingServiceImpl: RecordingService {
   private func startSession(
     for meeting: Meeting,
     meetingRepository: MeetingRepository
-  ) -> Result<RecordingSessionHandle, RecordingError> {
+  ) async -> Result<RecordingSessionHandle, RecordingError> {
     let archive = meetingRepository.archive
     do {
       try archive.createFolder(for: meeting.id)
@@ -277,7 +277,7 @@ final class RecordingServiceImpl: RecordingService {
       archive: archive,
       sourceApp: meeting.sourceApp)
     do {
-      try newSession.start(
+      try await newSession.startAsync(
         micURL: archive.micURL(for: meeting.id),
         systemURL: archive.systemURL(for: meeting.id),
         localeStore: localeStore)

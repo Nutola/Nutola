@@ -38,6 +38,11 @@ enum SettingsKey {
     static let hourlyRatePerPerson = "hourlyRatePerPerson" // estimated $/hr per attendee for the meeting-cost badge
     static let showMeetingCost = "showMeetingCost"           // display the 💰 cost badge in the meeting header
     static let smartTemplatesEnabled = "smartTemplatesEnabled" // auto-pick summary template by meeting type
+    static let fillerRemoval = "fillerRemoval"                 // strip uh/um/er/hmm from transcripts before summarizing
+    static let personalDictionary = "personalDictionary"         // [PersonalDictionaryStore.Entry] JSON: custom vocab + replacements
+    static let taskTracker = "taskTracker"                       // [TrackedTask] JSON: persistent activity tracker
+    static let ownerAliases = "ownerAliases"                     // [OwnerAlias] JSON: merge rule "You/Matheus" → "Matheus"
+    static let currentUserName = "currentUserName"              // display name for "me" — used by the activity tracker
 }
 
 enum AppearanceMode: String, CaseIterable, Identifiable, Hashable {
@@ -143,8 +148,8 @@ enum AppSettings {
             SettingsKey.developerMode: false,
             SettingsKey.crashDiagnostics: false,
             SettingsKey.hourlyRatePerPerson: 100.0,
-            SettingsKey.showMeetingCost: true,
             SettingsKey.smartTemplatesEnabled: true,
+            SettingsKey.fillerRemoval: false,
         ])
     }
 
@@ -240,5 +245,28 @@ enum AppSettings {
     /// is used for every meeting and no type badge is shown. Defaults to true.
     static var smartTemplatesEnabled: Bool {
         defaults.bool(forKey: SettingsKey.smartTemplatesEnabled)
+    }
+
+    /// Whether the pipeline strips verbal fillers (uh, um, er, hmm, …) from the
+    /// transcript text before summarization. Off by default — a faithful record is
+    /// usually what users want. Toggle in Settings → Meetings.
+    static var fillerRemoval: Bool {
+        defaults.bool(forKey: SettingsKey.fillerRemoval)
+    }
+
+    /// The user's display name, used by the activity tracker for "me" filtering.
+    /// Defaults to the macOS full name, falling back to the short username.
+    static var currentUserName: String {
+        if let saved = defaults.string(forKey: SettingsKey.currentUserName),
+           !saved.isEmpty {
+            return saved
+        }
+        let full = NSFullUserName()
+        if !full.isEmpty { return full }
+        return NSUserName()
+    }
+
+    static func setCurrentUserName(_ name: String) {
+        defaults.set(name, forKey: SettingsKey.currentUserName)
     }
 }

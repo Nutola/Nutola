@@ -3,17 +3,18 @@ import SwiftUI
 
 struct MeetingLauncherView: View {
     let meeting: Meeting
+    var initialQuestion: String?
 
     private var suggestions: [String] {
         MeetingAISuggestions.forMeeting(meeting)
     }
-
     var body: some View {
         AILauncherView(
             headline: "Ask about this meeting",
             subtitle: "Summarize, pull action items, or draft a follow-up.",
             suggestions: suggestions,
             contextMeeting: meeting,
+            initialQuestion: initialQuestion,
             promptBuilder: { question in
                 switch AppSettings.preferredAIProvider {
                 case .apple:
@@ -78,6 +79,10 @@ struct AILauncherView: View {
     let suggestions: [String]
     var recentMeetings: [Meeting] = []
     var contextMeeting: Meeting?
+    /// Pre-seeds and auto-submits a question on first appear (used by the
+    /// floating panel's suggestion chips to route through the in-app CLI
+    /// streaming UI instead of always opening the external app).
+    var initialQuestion: String?
     let promptBuilder: (String) -> String
     var meetingPromptBuilder: ((Meeting, String) -> String)?
 
@@ -94,6 +99,7 @@ struct AILauncherView: View {
     @State private var messages: [AskChatMessage] = []
     @State private var loadingMessageID: UUID?
     @State private var answerTask: Task<Void, Never>?
+    @State private var didSubmitInitialQuestion = false
     @State private var didSaveRecipe = false
     @FocusState private var composeFocused: Bool
     @Environment(\.colorScheme) private var scheme
@@ -116,6 +122,7 @@ struct AILauncherView: View {
         .onAppear {
             refreshAvailability()
             seedRecipesFromSuggestionsIfNeeded()
+            submitInitialQuestionIfNeeded()
         }
         .onReceive(NotificationCenter.default.publisher(for: .nutolaCLIAvailabilityChanged)) { _ in
             refreshAvailability()
@@ -739,6 +746,11 @@ struct AILauncherView: View {
         guard !text.isEmpty, !isAnswering else { return }
         input = ""
         launch(text)
+    }
+    private func submitInitialQuestionIfNeeded() {
+        guard !didSubmitInitialQuestion, let question = initialQuestion?.trimmingCharacters(in: .whitespaces), !question.isEmpty else { return }
+        didSubmitInitialQuestion = true
+        launch(question)
     }
 
     /// One-shot seed: the first time the launcher appears, copy the built-in

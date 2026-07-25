@@ -55,7 +55,7 @@ final class TalkTimeAggregatorTests: XCTestCase {
         let byID = Dictionary(uniqueKeysWithValues: summaries.map { ($0.speakerID, $0) })
         XCTAssertEqual(summaries.count, 2)
         let me = try XCTUnwrap(byID["me"])
-        let alice = try XCTUnwrap(byID["s1"])
+        let alice = try XCTUnwrap(byID["alice"])
         XCTAssertEqual(me.totalTalkTime, 50, accuracy: 0.001)
         XCTAssertEqual(alice.totalTalkTime, 70, accuracy: 0.001)
         XCTAssertEqual(me.meetingCount, 2)
@@ -105,7 +105,7 @@ final class TalkTimeAggregatorTests: XCTestCase {
 
         let byID = Dictionary(uniqueKeysWithValues: summaries.map { ($0.speakerID, $0) })
         let me = try XCTUnwrap(byID["me"])
-        let alice = try XCTUnwrap(byID["s1"])
+        let alice = try XCTUnwrap(byID["alice"])
         XCTAssertEqual(me.percentageOfTotal, 25, accuracy: 0.001)
         XCTAssertEqual(alice.percentageOfTotal, 75, accuracy: 0.001)
         // Percentages should sum to 100.
@@ -173,9 +173,49 @@ final class TalkTimeAggregatorTests: XCTestCase {
             transcripts: [(m1.id, seg1), (m2.id, seg2)],
             speakers: [(m1.id, speakers), (m2.id, speakers)])
 
-        XCTAssertEqual(summaries.map { $0.speakerID }, ["me", "s1", "s2"])
+        XCTAssertEqual(summaries.map { $0.speakerID }, ["me", "alice", "bob"])
         XCTAssertEqual(summaries[0].totalTalkTime, 60, accuracy: 0.001)
         XCTAssertEqual(summaries[1].totalTalkTime, 40, accuracy: 0.001)
         XCTAssertEqual(summaries[2].totalTalkTime, 20, accuracy: 0.001)
+    }
+
+    // MARK: - Same display name across meetings collapses (the bug fix)
+
+    func testSameDisplayNameAcrossMeetingsMerges() throws {
+        // The original bug: SpeakerLabeler resets IDs per meeting, so "Gui Lima"
+        // appears as s1 in M1 and s2 in M2 — the aggregator used to emit two
+        // rows. With name-based keying they should collapse into one.
+        let m1 = Meeting(title: "M1", createdAt: Date(), duration: 60)
+        let m2 = Meeting(title: "M2", createdAt: Date(), duration: 60)
+        let speakersM1 = [Speaker(id: "me", name: "Me", isMe: true), Speaker(id: "s1", name: "Gui Lima")]
+        let speakersM2 = [Speaker(id: "me", name: "Me", isMe: true), Speaker(id: "s2", name: "Gui Lima")]
+
+        let seg1 = [
+            TranscriptSegment(speakerID: "me", start: 0, end: 10, text: "a"),
+            TranscriptSegment(speakerID: "s1", start: 10, end: 40, text: "b"),
+        ]
+        let seg2 = [
+            TranscriptSegment(speakerID: "me", start: 0, end: 10, text: "c"),
+            TranscriptSegment(speakerID: "s2", start: 10, end: 30, text: "d"),
+        ]
+
+        let summaries = TalkTimeAggregator.aggregate(
+            meetings: [m1, m2],
+            transcripts: [(m1.id, seg1), (m2.id, seg2)],
+            speakers: [(m1.id, speakersM1), (m2.id, speakersM2)])
+
+        // Two rows: "Me" and "Gui Lima" — NOT three.
+        XCTAssertEqual(summaries.count, 2)
+        let gui = try XCTUnwrap(summaries.first { $0.name == "Gui Lima" })
+        // 30s (M1) + 20s (M2) = 50s, across 2 meetings.
+        XCTAssertEqual(gui.totalTalkTime, 50, accuracy: 0.001)
+        XCTAssertEqual(gui.meetingCount, 2)
+    }
+
+    func testNameKeyNormalizes() {
+        // Case + whitespace differences collapse to one key.
+        XCTAssertEqual(TalkTimeAggregator.nameKey("Gui Lima"), TalkTimeAggregator.nameKey("gui lima"))
+        XCTAssertEqual(TalkTimeAggregator.nameKey("Gui  Lima "), TalkTimeAggregator.nameKey("Gui Lima"))
+        XCTAssertEqual(TalkTimeAggregator.nameKey("  "), "")
     }
 }

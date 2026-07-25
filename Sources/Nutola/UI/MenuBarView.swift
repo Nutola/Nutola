@@ -209,7 +209,7 @@ struct MenuBarView: View {
             }
 
             if showJoin, let url = event.conferenceURL {
-                ConferenceJoinButton(label: event.joinLabel, url: url)
+                ConferenceJoinButton(label: event.joinLabel, url: url, calendarEvent: event)
             } else if event.conferenceURL != nil {
                 ConferenceVideoIcon()
                     .padding(.top, 1)

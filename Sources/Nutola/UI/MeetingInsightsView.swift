@@ -17,7 +17,7 @@ struct MeetingInsightsView: View {
     }
 
     private var weekStart: Date {
-        Calendar.current.startOfDay(for: weekAnchor)
+        Self.mondayOfWeek(for: weekAnchor)
     }
     private var weekMeetings: [Meeting] {
         let calendar = Calendar.current
@@ -25,7 +25,7 @@ struct MeetingInsightsView: View {
         guard let end = calendar.date(byAdding: .day, value: 7, to: start) else {
             return app.store.meetings
         }
-        return app.store.meetings.filter { $0.createdAt >= start && $0.createdAt < end }
+        return app.store.meetings.filter { $0.createdAt >= start && $0.createdAt < end && $0.state != .prep }
     }
 
     private var weekRangeLabel: String {
@@ -53,6 +53,7 @@ struct MeetingInsightsView: View {
                     cards
                     chart
                     talkTimeSection
+                    perMeetingSection
                     costSection
                 }
             }
@@ -186,6 +187,60 @@ struct MeetingInsightsView: View {
         .background(Theme.card(scheme), in: RoundedRectangle(cornerRadius: Theme.cornerRadius))
     }
 
+    // MARK: - Per-meeting breakdown
+
+    /// One talk-time card per meeting in the week — the user can see who spoke
+    /// in each individual meeting, not just the cross-meeting aggregate. A
+    /// single-meeting `TalkTimeDashboardView` already renders a correct
+    /// per-speaker ranking, so we just wrap it with the meeting's title/date.
+    private var perMeetingSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 6) {
+                Image(systemName: "person.3.fill")
+                    .font(.nutola(13, .medium))
+                    .foregroundStyle(Theme.blueberry(scheme))
+                Text("Talk time per meeting")
+                    .font(.nutola(14, .semibold))
+                    .foregroundStyle(Theme.heading(scheme))
+                Spacer(minLength: 0)
+            }
+            ForEach(transcribedWeekMeetings) { meeting in
+                perMeetingCard(meeting)
+            }
+        }
+        .padding(16)
+        .background(Theme.card(scheme), in: RoundedRectangle(cornerRadius: Theme.cornerRadius))
+    }
+
+    /// Week meetings that actually have a transcript to show. Skip recordings
+    /// in progress, prep-state stubs, and anything without segments.
+    private var transcribedWeekMeetings: [Meeting] {
+        weekMeetings.filter { meeting in
+            meeting.state == .ready && !app.store.transcript(for: meeting.id).isEmpty
+        }
+    }
+
+    private func perMeetingCard(_ meeting: Meeting) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(meeting.title.isEmpty ? "Untitled meeting" : meeting.title)
+                    .font(.nutola(13, .semibold))
+                    .foregroundStyle(Theme.heading(scheme))
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+                Text(meeting.createdAt, format: .dateTime.month().day().hour().minute())
+                    .font(.nutola(10))
+                    .foregroundStyle(Theme.tertiary(scheme))
+            }
+            Text("\(formatDuration(meeting.duration)) · \(meeting.attendees.count) invited")
+                .font(.nutola(10))
+                .foregroundStyle(Theme.tertiary(scheme))
+            TalkTimeDashboardView(meetings: [meeting])
+        }
+        .padding(12)
+        .background(Theme.chip(scheme), in: RoundedRectangle(cornerRadius: 10))
+    }
+
     // MARK: - Meeting cost
 
     private var costSection: some View {
@@ -239,6 +294,19 @@ struct MeetingInsightsView: View {
             return "\(hours)h \(minutes)m"
         }
         return "\(minutes)m"
+    }
+
+    /// Snap `date` to the Monday of its week. Uses `Calendar.current` so
+    /// the locale's first weekday is respected (most locales start Monday).
+    private static func mondayOfWeek(for date: Date) -> Date {
+        let calendar = Calendar.current
+        let weekday = calendar.component(.weekday, from: date)
+        let offset = (weekday - 2 + 7) % 7
+        guard let monday = calendar.date(
+            byAdding: .day, value: -offset,
+            to: calendar.startOfDay(for: date)
+        ) else { return calendar.startOfDay(for: date) }
+        return monday
     }
 }
 

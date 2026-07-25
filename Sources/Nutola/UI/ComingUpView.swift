@@ -410,7 +410,7 @@ struct ComingUpView: View {
             templatePickerChip(for: event)
 
             if showJoin, let url = event.conferenceURL {
-                ConferenceJoinButton(label: event.joinLabel, url: url)
+                ConferenceJoinButton(label: event.joinLabel, url: url, calendarEvent: event)
             }
         }
         .fixedSize(horizontal: true, vertical: false)

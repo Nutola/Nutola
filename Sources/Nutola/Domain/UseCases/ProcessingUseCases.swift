@@ -146,7 +146,15 @@ final class RegenerateSummaryUseCase {
         onStreamingSummary?(meetingID, "")
 
         let segments = meetingRepository.transcript(for: meetingID)
-        let text = TranscriptFormatter.plainText(segments, speakers: entry.speakers)
+        let rawText = TranscriptFormatter.plainText(segments, speakers: entry.speakers)
+        var text = rawText
+        if AppSettings.fillerRemoval {
+            text = FillerWordRemover.clean(text)
+        }
+        let dictionary = PersonalDictionaryStore()
+        if dictionary.hasAny {
+            text = dictionary.apply(to: text)
+        }
         let userNotes = meetingRepository.sideNotes(for: meetingID)
         let titleAtEntry = entry.title
 
@@ -169,7 +177,13 @@ final class RegenerateSummaryUseCase {
         guard var fresh = meetingRepository.meeting(id: meetingID) else { return }
         switch outcome {
         case .success(let summary, let provider):
-            meetingRepository.saveSummary(summary, for: meetingID)
+            let roster = meetingRepository.archive.zoomRoster(for: meetingID)
+            let annotated = AdditionalParticipantsAnnotator.annotation(
+                roster: roster,
+                attendees: entry.attendees)
+                .map { summary + "\n\n" + $0 }
+                ?? summary
+            meetingRepository.saveSummary(annotated, for: meetingID)
             fresh.summaryProvider = provider
             fresh.notice = nil
             if let generatedTitle, fresh.title == titleAtEntry {

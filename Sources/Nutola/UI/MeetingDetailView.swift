@@ -89,7 +89,7 @@ struct MeetingDetailView: View {
                             Spacer()
                         }
                     }
-                    ConferenceJoinButton(label: join.label, url: join.url, prominent: true)
+                    ConferenceJoinButton(label: join.label, url: join.url, prominent: true, calendarEvent: linkedCalendarEvent)
                         .frame(maxWidth: 560)
                 }
                 .frame(maxWidth: 560)
@@ -893,6 +893,7 @@ struct MeetingDetailView: View {
             Divider()
             Menu("Export…") {
                 Button("HTML…") { exportHTML() }
+                Button("PDF…") { exportPDF() }
                 Button("Markdown…") { exportMarkdown() }
                 Button("Subtitles (.srt)…") { exportSRT() }
                 Button("Subtitles (.vtt)…") { exportVTT() }
@@ -1198,6 +1199,18 @@ struct MeetingDetailView: View {
             app.store.transcript(for: meeting.id),
             speakers: meeting.speakers)
         try? vtt.data(using: .utf8)?.write(to: dest)
+    }
+
+    private func exportPDF() {
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = safeFilename + ".pdf"
+        panel.allowedContentTypes = [.pdf]
+        guard panel.runModal() == .OK, let dest = panel.url else { return }
+        try? PDFExporter.exportPDF(
+            meeting: meeting,
+            summaryMarkdown: app.store.summary(for: meeting.id),
+            segments: app.store.transcript(for: meeting.id),
+            to: dest)
     }
 
     private var safeFilename: String {

@@ -302,4 +302,72 @@ final class StoreTests: XCTestCase {
         archive.saveZoomRoster([], for: m.id)
         XCTAssertEqual(archive.zoomRoster(for: m.id), [])
     }
+
+    // MARK: - bulkRenameSpeakers (cross-meeting rename / merge)
+
+    @MainActor
+    func testBulkRenameAcrossMeetings() throws {
+        let store = MeetingStore(archive: archive)
+        var m1 = makeMeeting(title: "M1")
+        var m2 = makeMeeting(title: "M2")
+        // Both meetings have a "Gui Lima" speaker (with different IDs, mirroring
+        // SpeakerLabeler's per-meeting reset).
+        m1.speakers = [Speaker(id: "me", name: "Me", isMe: true), Speaker(id: "s1", name: "Gui Lima")]
+        m2.speakers = [Speaker(id: "me", name: "Me", isMe: true), Speaker(id: "s2", name: "Gui Lima")]
+        try archive.save(m1)
+        try archive.save(m2)
+        store.reload()
+
+        let touched = store.bulkRenameSpeakers(from: "Gui Lima", to: "Guilherme Lima")
+        XCTAssertEqual(touched, 2)
+        let after1 = store.meeting(id: m1.id)!
+        let after2 = store.meeting(id: m2.id)!
+        XCTAssertEqual(after1.speakers.first { $0.id == "s1" }?.name, "Guilherme Lima")
+        XCTAssertEqual(after2.speakers.first { $0.id == "s2" }?.name, "Guilherme Lima")
+    }
+
+    @MainActor
+    func testBulkRenameIsCaseInsensitiveAndWhitespaceTolerant() throws {
+        let store = MeetingStore(archive: archive)
+        var m1 = makeMeeting(title: "M1")
+        m1.speakers = [Speaker(id: "me", name: "Me", isMe: true), Speaker(id: "s1", name: "Gui  Lima ")]
+        try archive.save(m1)
+        store.reload()
+
+        let touched = store.bulkRenameSpeakers(from: "gui lima", to: "Guilherme Lima")
+        XCTAssertEqual(touched, 1)
+        XCTAssertEqual(store.meeting(id: m1.id)!.speakers.first { $0.id == "s1" }?.name, "Guilherme Lima")
+    }
+
+    @MainActor
+    func testBulkRenameNoOpForSameName() throws {
+        let store = MeetingStore(archive: archive)
+        var m1 = makeMeeting(title: "M1")
+        m1.speakers = [Speaker(id: "me", name: "Me", isMe: true), Speaker(id: "s1", name: "Alice")]
+        try archive.save(m1)
+        store.reload()
+
+        // "alice" → "Alice" should still rename (different display strings).
+        XCTAssertEqual(store.bulkRenameSpeakers(from: "alice", to: "Alice"), 1)
+        // "Alice" → "Alice" should be a no-op.
+        XCTAssertEqual(store.bulkRenameSpeakers(from: "Alice", to: "Alice"), 0)
+    }
+
+    @MainActor
+    func testBulkRenameOnlyTouchesMatchingMeetings() throws {
+        let store = MeetingStore(archive: archive)
+        var m1 = makeMeeting(title: "M1")
+        var m2 = makeMeeting(title: "M2")
+        m1.speakers = [Speaker(id: "me", name: "Me", isMe: true), Speaker(id: "s1", name: "Bob")]
+        m2.speakers = [Speaker(id: "me", name: "Me", isMe: true), Speaker(id: "s1", name: "Carol")]
+        try archive.save(m1)
+        try archive.save(m2)
+        store.reload()
+
+        let touched = store.bulkRenameSpeakers(from: "Bob", to: "Robert")
+        XCTAssertEqual(touched, 1)
+        XCTAssertEqual(store.meeting(id: m1.id)!.speakers.first { $0.id == "s1" }?.name, "Robert")
+        // M2 untouched.
+        XCTAssertEqual(store.meeting(id: m2.id)!.speakers.first { $0.id == "s1" }?.name, "Carol")
+    }
 }

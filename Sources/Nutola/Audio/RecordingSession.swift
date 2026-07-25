@@ -123,6 +123,115 @@ final class RecordingSession: ObservableObject {
   }
 
   func start(micURL: URL, systemURL: URL, localeStore: TranscriptionLocaleStore? = nil) throws {
+    try startSync(micURL: micURL, systemURL: systemURL, localeStore: localeStore)
+  }
+
+  /// Async variant that runs the blocking CoreAudio device setup on a background
+  /// task instead of the main thread. The main thread can deadlock in
+  /// `AudioObjectGetPropertyDataSize` (the HAL mutex) when CoreAudio IO contexts
+  /// are active on other threads — this is the exact hang the file logger was
+  /// added to diagnose. Prefer this from `@MainActor async` callers.
+  func startAsync(micURL: URL, systemURL: URL, localeStore: TranscriptionLocaleStore? = nil) async throws {
+    MicRecorder.logAudioDeviceSnapshot(context: "session start")
+    NutolaConsoleLog.recording(
+      "start meeting=\(meetingID.uuidString.prefix(8)) offset=\(Int(elapsedOffset))s source=\(sourceApp ?? "manual") accessibility=\(AccessibilityPermission.isTrusted)"
+    )
+    if let localeStore, transcriptionLocale == nil {
+      transcriptionLocale = localeStore.locale(forMeetingID: meetingID.uuidString)
+    }
+
+    // Live transcription runs alongside capture. Set the buffer sinks BEFORE
+    // starting the recorders so no early audio is missed; it's best-effort —
+    // any failure here never affects the recording itself.
+    let live = LiveTranscriber(startDate: startedAt, timeOffset: elapsedOffset)
+    live.headphoneBleedMode = MicRecorder.headphoneBleedLikely
+    live.localeOverride = transcriptionLocale
+    if live.headphoneBleedMode {
+      NutolaConsoleLog.recording("headphone bleed mode — mic bleed will attribute to Others")
+    }
+    live.onUpdate = { [weak self] segments, volatile in
+      Task { @MainActor in self?.applyLive(segments, volatile) }
+    }
+    liveTranscriber = live
+
+    // Set the local speaker's display name immediately from the macOS account
+    // holder. When the Zoom roster arrives, it's refined to the Zoom display name.
+    let full = NSFullUserName().trimmingCharacters(in: .whitespacesAndNewlines)
+    if !full.isEmpty {
+      LiveTranscriber.localSpeakerName = full
+    }
+
+    mic.levelHandler = { [weak self] levels in
+      Task { @MainActor in self?.micBarLevels = levels }
+    }
+    mic.bufferSink = { [weak live] buffer in live?.feedMic(buffer) }
+    mic.onRestartFailure = { [weak self] error in
+      // The mic engine failed to restart after an audio route change —
+      // surface it so the UI can warn that the mic side went silent.
+      Task { @MainActor in self?.micRestartError = error.localizedDescription }
+    }
+    tap.signalDetectedHandler = {
+      AppSettings.markSystemAudioConfirmed()
+      NutolaConsoleLog.recording("system audio confirmed — non-silent signal received")
+    }
+    tap.bufferSink = { [weak live] buffer in live?.feedSystem(buffer) }
+    // Run the blocking CoreAudio device setup (tap.start + mic.start) on a
+    // background task so the HAL mutex can't deadlock the main thread. The
+    // recorders are internally synchronized (MicRecorder.lock /
+    // SystemAudioTap.controlQueue) so running off-MainActor is safe; they only
+    // call back into MainActor via the closures set above.
+    let micRecorder = mic
+    let systemTap = tap
+    let resolvedSourceApp = sourceApp
+    let result: (didMic: Bool, didSystem: Bool, problems: [String]) = await Task.detached(priority: .userInitiated) {
+      // Start the system audio tap FIRST. It creates a Core Audio aggregate
+      // device (AudioHardwareCreateAggregateDevice) which can disrupt an
+      // already-running AVAudioEngine's input node — the engine's input route
+      // becomes stale and no buffers arrive. Starting the tap first means the
+      // aggregate device exists before the mic engine starts, so the engine
+      // binds to the correct input device.
+      var problems: [String] = []
+      var didMic = false
+      var didSystem = false
+      do {
+        try systemTap.start(writingTo: systemURL)
+        didSystem = true
+      } catch {
+        let ns = error as NSError
+        NutolaConsoleLog.recording(
+          "system tap start failed domain=\(ns.domain) code=\(ns.code) — \(error.localizedDescription)"
+        )
+        problems.append("system audio: \(error.localizedDescription)")
+      }
+      do {
+        try micRecorder.start(writingTo: micURL, sourceApp: resolvedSourceApp)
+        didMic = true
+      } catch {
+        let ns = error as NSError
+        NutolaConsoleLog.recording(
+          "mic start failed domain=\(ns.domain) code=\(ns.code) — \(error.localizedDescription)")
+        problems.append("microphone: \(error.localizedDescription)")
+      }
+      return (didMic, didSystem, problems)
+    }.value
+    micStarted = result.didMic
+    systemStarted = result.didSystem
+    if systemStarted {
+      live.systemPeakProvider = { [weak tap] in tap?.recentSystemPeak ?? 0 }
+    }
+    guard micStarted || systemStarted else {
+      NutolaConsoleLog.recording("failed to start — \(result.problems.joined(separator: "; "))")
+      throw SessionError.nothingStarted(result.problems.joined(separator: "; "))
+    }
+    NutolaConsoleLog.recording("capture mic=\(micStarted) system=\(systemStarted) live=starting")
+
+    startPostCaptureSetup(live: live)
+  }
+
+  /// Synchronous start — used by tests and any non-async caller. Runs the
+  /// blocking CoreAudio setup on the calling thread; do NOT call from the main
+  /// thread in production (use `startAsync` instead to avoid the HAL deadlock).
+  private func startSync(micURL: URL, systemURL: URL, localeStore: TranscriptionLocaleStore?) throws {
     MicRecorder.logAudioDeviceSnapshot(context: "session start")
     NutolaConsoleLog.recording(
       "start meeting=\(meetingID.uuidString.prefix(8)) offset=\(Int(elapsedOffset))s source=\(sourceApp ?? "manual") accessibility=\(AccessibilityPermission.isTrusted)"
@@ -199,6 +308,12 @@ final class RecordingSession: ObservableObject {
     }
     NutolaConsoleLog.recording("capture mic=\(micStarted) system=\(systemStarted) live=starting")
 
+    startPostCaptureSetup(live: live)
+  }
+
+  /// Post-capture setup shared by both start paths: live transcription launch,
+  /// Zoom speaker tracker, elapsed timer, and system-audio watchdog.
+  private func startPostCaptureSetup(live: LiveTranscriber) {
     // Model/asset setup is async; buffers fed before it's ready are dropped.
     Task {
       do {
@@ -366,20 +481,36 @@ final class RecordingSession: ObservableObject {
     let systemURL = archive.systemURL(for: meetingID)
     let micHeard = micStarted ? mic.captureStats.receivedAnyBuffer : false
     let systemSignal = systemStarted ? tap.signalDetected : false
-    if micStarted { mic.stop() }
-    if systemStarted { tap.stop() }
-    let micBytes =
-      (try? FileManager.default.attributesOfItem(atPath: micURL.path)[.size] as? Int) ?? 0
-    let systemBytes =
-      (try? FileManager.default.attributesOfItem(atPath: systemURL.path)[.size] as? Int) ?? 0
-    NutolaConsoleLog.recording(
-      "capture files mic=\(micBytes)B system=\(systemBytes)B micSignal=\(micHeard) systemSignal=\(systemSignal)"
-    )
-    if micBytes == 0 && systemBytes == 0 {
-      stopNotice = "No audio was captured — check your microphone and system audio settings"
-      NutolaConsoleLog.recording("stop notice: no audio captured (both files empty)")
-    } else {
-      stopNotice = nil
+    // Dispatch the recorder stops AND the file-size check to a background thread —
+    // MicRecorder.stop() and SystemAudioTap.stop() acquire internal locks/queues
+    // that may be held by a restart or CoreAudio IO callback. Blocking on the
+    // main thread here freezes the UI (the deadlock seen when
+    // restartAfterConfigurationChange holds MicRecorder.lock while stop() waits
+    // for it on the main thread). The stopNotice result is set async via Task.
+    let micRecorder = mic
+    let systemTap = tap
+    let didMic = micStarted
+    let didSystem = systemStarted
+    let archiveRef = self.archive
+    Task.detached(priority: .userInitiated) {
+      if didMic { micRecorder.stop() }
+      if didSystem { systemTap.stop() }
+      let micBytes =
+        (try? FileManager.default.attributesOfItem(atPath: micURL.path)[.size] as? Int) ?? 0
+      let systemBytes =
+        (try? FileManager.default.attributesOfItem(atPath: systemURL.path)[.size] as? Int) ?? 0
+      NutolaConsoleLog.recording(
+        "capture files mic=\(micBytes)B system=\(systemBytes)B micSignal=\(micHeard) systemSignal=\(systemSignal)"
+      )
+      await MainActor.run { [weak self] in
+        guard let self else { return }
+        if micBytes == 0 && systemBytes == 0 {
+          self.stopNotice = "No audio was captured — check your microphone and system audio settings"
+          NutolaConsoleLog.recording("stop notice: no audio captured (both files empty)")
+        } else {
+          self.stopNotice = nil
+        }
+      }
     }
     if let live = liveTranscriber {
       liveTranscriber = nil
@@ -388,7 +519,7 @@ final class RecordingSession: ObservableObject {
       // transcript.json lands.
       Task {
         await live.stop()
-        archive.saveLiveTranscript(liveSegments, for: meetingID)
+        archiveRef.saveLiveTranscript(liveSegments, for: meetingID)
         NutolaConsoleLog.recording("live transcript flushed (\(liveSegments.count) segments)")
       }
     }

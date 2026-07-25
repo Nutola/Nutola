@@ -8,6 +8,9 @@ struct MeetingsListView: View {
     @State private var searchQuery = ""
     @FocusState private var searchFocused: Bool
     @State private var meetingToDelete: Meeting?
+    @State private var showImportAudio = false
+    @State private var importError: String?
+    @State private var isImporting = false
 
     private var groups: [MeetingDayGroup] {
         MeetingDayGrouper.group(meetings: app.store.meetings)
@@ -23,10 +26,25 @@ struct MeetingsListView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
-                Text("Meetings")
-                    .font(.nutola(22, .bold))
-                    .foregroundStyle(Theme.heading(scheme))
-
+                HStack {
+                    Text("Meetings")
+                        .font(.nutola(22, .bold))
+                        .foregroundStyle(Theme.heading(scheme))
+                    Spacer()
+                    Menu {
+                        Button {
+                            showImportAudio = true
+                        } label: {
+                            Label("Import Audio…", systemImage: "waveform.badge.plus")
+                        }
+                    } label: {
+                        Image(systemName: "plus.circle")
+                            .font(.nutola(15, .medium))
+                            .foregroundStyle(Theme.secondary(scheme))
+                    }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+                }
                 searchField
 
                 if groups.isEmpty {
@@ -114,6 +132,59 @@ struct MeetingsListView: View {
             if let meetingToDelete {
                 Text("“\(meetingToDelete.calendarEventTitle ?? meetingToDelete.title)” and its transcript, notes, and audio files will be permanently deleted. This cannot be undone.")
             }
+        }
+        .modifier(ImportAudioModifier(
+            showImportAudio: $showImportAudio,
+            importError: $importError,
+            isImporting: $isImporting,
+            importHandler: { url in
+                isImporting = true
+                Task {
+                    _ = await app.importAudio(fileURL: url)
+                    await MainActor.run { isImporting = false }
+                }
+            }
+        ))
+    }
+
+    private struct ImportAudioModifier: ViewModifier {
+        @Binding var showImportAudio: Bool
+        @Binding var importError: String?
+        @Binding var isImporting: Bool
+        var importHandler: (URL) -> Void
+        @EnvironmentObject private var app: AppState
+        @Environment(\.colorScheme) private var scheme
+
+        func body(content: Content) -> some View {
+            content
+                .fileImporter(
+                    isPresented: $showImportAudio,
+                    allowedContentTypes: [.audio, .mp3, .wav, .mpeg4Movie],
+                    allowsMultipleSelection: false
+                ) { result in
+                    switch result {
+                    case .success(let urls):
+                        guard let url = urls.first else { return }
+                        importHandler(url)
+                    case .failure(let error):
+                        importError = error.localizedDescription
+                    }
+                }
+                .alert("Import failed", isPresented: Binding(
+                    get: { importError != nil },
+                    set: { if !$0 { importError = nil } })
+                ) {
+                    Button("OK") { importError = nil }
+                } message: {
+                    Text(importError ?? "")
+                }
+                .overlay {
+                    if isImporting {
+                        ProgressView("Importing & transcribing…")
+                            .padding(20)
+                            .background(Theme.surface(scheme), in: RoundedRectangle(cornerRadius: 12))
+                    }
+                }
         }
     }
 

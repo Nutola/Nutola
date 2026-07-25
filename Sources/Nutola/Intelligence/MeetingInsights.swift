@@ -45,7 +45,7 @@ enum MeetingInsightsCalculator {
         forWeekOf date: Date,
         calendar: Calendar = .current
     ) -> MeetingInsights {
-        let weekStart = calendar.startOfDay(for: date)
+        let weekStart = Self.mondayOfWeek(for: date, calendar: calendar)
 
         // Build the 7-day skeleton in week order so the breakdown is always
         // exactly 7 entries, even when the week held no meetings.
@@ -67,7 +67,9 @@ enum MeetingInsightsCalculator {
                 perDayBreakdown: breakdown)
         }
 
-        let inWeek = meetings.filter { $0.createdAt >= weekStart && $0.createdAt < weekEnd }
+        let inWeek = meetings.filter {
+            $0.createdAt >= weekStart && $0.createdAt < weekEnd && $0.state != .prep
+        }
 
         var counts = [Int](repeating: 0, count: 7)
         var minutes = [Int](repeating: 0, count: 7)
@@ -118,5 +120,19 @@ enum MeetingInsightsCalculator {
         let symbols = calendar.shortWeekdaySymbols
         guard symbols.indices.contains(weekday - 1) else { return "" }
         return symbols[weekday - 1]
+    }
+
+    /// Snap `date` to the Monday of its week. Monday is weekday 2 in
+    /// `Calendar` (Sunday=1). The offset is (weekday - 2 + 7) % 7 so
+    /// Monday itself returns 0, Sunday returns 6, etc.
+    private static func mondayOfWeek(
+        for date: Date, calendar: Calendar
+    ) -> Date {
+        let weekday = calendar.component(.weekday, from: date)
+        let offset = (weekday - 2 + 7) % 7
+        guard let monday = calendar.date(
+            byAdding: .day, value: -offset, to: calendar.startOfDay(for: date)
+        ) else { return calendar.startOfDay(for: date) }
+        return monday
     }
 }

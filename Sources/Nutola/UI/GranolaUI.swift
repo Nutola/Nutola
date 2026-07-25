@@ -50,8 +50,11 @@ struct GranolaFloatingPanel: View {
   @State private var askAvailable = false
   @State private var transcriptSearch = ""
   @State private var isTranscriptSearchPresented = false
+  @State private var showAskSheet = false
+  @State private var askSheetQuestion: String?
   @FocusState private var transcriptSearchFocused: Bool
   @AppStorage(SettingsKey.preferredAIProvider) private var preferredAIProvider: AIProvider = .apple
+  @AppStorage(SettingsKey.askDeliveryMode) private var askDeliveryMode: AskDeliveryMode = .cli
 
   private var isExpanded: Bool { mode != nil }
   private var segments: [TranscriptSegment] { app.store.transcript(for: meeting.id) }
@@ -106,12 +109,17 @@ struct GranolaFloatingPanel: View {
       refreshAskAvailability()
     }
     .onChange(of: preferredAIProvider) { refreshAskAvailability() }
+    .onChange(of: askDeliveryMode) { refreshAskAvailability() }
     .onChange(of: mode) { _, newMode in
       if newMode != .transcript {
         transcriptSearch = ""
         isTranscriptSearchPresented = false
         transcriptSearchFocused = false
       }
+    }
+    .sheet(isPresented: $showAskSheet) {
+      MeetingLauncherView(meeting: meeting, initialQuestion: askSheetQuestion)
+        .frame(minWidth: 560, minHeight: 480)
     }
   }
 
@@ -618,17 +626,28 @@ struct GranolaFloatingPanel: View {
   }
 
   private func launchAsk(_ question: String) {
-    let prompt: String
-    switch preferredAIProvider {
-    case .apple: return
-    case .claude:
-      prompt = ClaudeDesktopPrompt.meeting(
-        id: meeting.id, title: meeting.title, question: question)
-    case .codex:
-      prompt = CodexPrompt.meeting(
-        id: meeting.id, title: meeting.title, question: question)
+    // Mirrors AILauncherView.submit: "Answer here" (CLI) streams in-app via the
+    // Ask sheet; "Open in app" deep-links the external assistant. Apple
+    // Intelligence is always CLI (on-device), so it routes through the sheet too.
+    let effectiveMode: AskDeliveryMode = preferredAIProvider == .apple ? .cli : askDeliveryMode
+    switch effectiveMode {
+    case .cli:
+      askSheetQuestion = question
+      showAskSheet = true
+    case .app:
+      let prompt: String
+      switch preferredAIProvider {
+      case .apple:
+        return
+      case .claude:
+        prompt = ClaudeDesktopPrompt.meeting(
+          id: meeting.id, title: meeting.title, question: question)
+      case .codex:
+        prompt = CodexPrompt.meeting(
+          id: meeting.id, title: meeting.title, question: question)
+      }
+      _ = AIAsk.open(prompt: prompt)
     }
-    _ = AIAsk.open(prompt: prompt)
     askInput = ""
   }
 }

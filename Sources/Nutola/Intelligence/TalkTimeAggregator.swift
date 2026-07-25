@@ -56,27 +56,34 @@ enum TalkTimeAggregator {
             guard !perSpeaker.isEmpty else { continue }
 
             for stat in perSpeaker {
-                if totals[stat.speakerID] == nil { order.append(stat.speakerID) }
-                totals[stat.speakerID, default: 0] += stat.talkTime
-                meetingCounts[stat.speakerID, default: 0] += 1
-                // Prefer the first non-ID name we see; fall back to the ID. Speakers
-                // with the same ID across meetings share one summary, so a later
-                // meeting can refine an unknown name into a real one.
-                if names[stat.speakerID] == nil || names[stat.speakerID] == stat.speakerID {
-                    names[stat.speakerID] = stat.name
+                // Cross-meeting aggregation keys on the speaker's NORMALIZED
+                // display name, not the per-meeting speakerID. SpeakerLabeler
+                // resets IDs (`s1`, `s2`, ...) per meeting, so the same person
+                // gets a different ID in each call. Two meetings with "Gui Lima"
+                // as `s1` and `s2` would otherwise show as two separate rows —
+                // keying by name collapses them into one.
+                let key = Self.nameKey(stat.name)
+                if totals[key] == nil { order.append(key) }
+                totals[key, default: 0] += stat.talkTime
+                meetingCounts[key, default: 0] += 1
+                // Prefer the most specific (non-ID) name we see. The first
+                // non-key name wins, and a later meeting can refine an unknown
+                // name into a real one.
+                if names[key] == nil || names[key] == key {
+                    names[key] = stat.name
                 }
             }
         }
 
         let grandTotal = totals.values.reduce(0, +)
 
-        return order.map { id in
-            let total = totals[id, default: 0]
-            let count = meetingCounts[id, default: 0]
+        return order.map { key in
+            let total = totals[key, default: 0]
+            let count = meetingCounts[key, default: 0]
             let pct = grandTotal > 0 ? total / grandTotal * 100 : 0
             return SpeakerTalkTimeSummary(
-                speakerID: id,
-                name: names[id] ?? id,
+                speakerID: key,
+                name: names[key] ?? key,
                 totalTalkTime: total,
                 meetingCount: count,
                 avgTalkTimePerMeeting: count > 0 ? total / Double(count) : 0,
@@ -87,5 +94,16 @@ enum TalkTimeAggregator {
                 ? lhs.totalTalkTime > rhs.totalTalkTime
                 : lhs.speakerID < rhs.speakerID
         }
+    }
+
+    /// Normalized key for display-name-based aggregation: lowercase, trimmed,
+    /// internal whitespace collapsed to a single space. "Gui Lima" / "gui lima "
+    /// / "Gui  Lima" all collapse to "gui lima".
+    static func nameKey(_ name: String) -> String {
+        name.lowercased()
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .components(separatedBy: .whitespaces)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
     }
 }
