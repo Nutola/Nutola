@@ -231,13 +231,14 @@ final class TaskTrackerStoreTests: XCTestCase {
         let cal = Calendar(identifier: .gregorian)
         let now = cal.date(from: DateComponents(year: 2026, month: 7, day: 22, hour: 12))!
 
-        // Create 3 tasks today
-        _ = store.add(text: "Task A")
-        _ = store.add(text: "Task B")
-        let taskC = store.add(text: "Task C")
+        // Create 3 tasks on the anchor day (createdAt pinned so the test is
+        // deterministic regardless of the real wall-clock date).
+        _ = store.add(text: "Task A", createdAt: now)
+        _ = store.add(text: "Task B", createdAt: now)
+        let taskC = store.add(text: "Task C", createdAt: now)
 
-        // Complete one
-        store.toggle(id: taskC.id)
+        // Complete one (pinned to the same anchor day).
+        store.toggle(id: taskC.id, at: now)
 
         let insights = store.dailyInsights(for: 1, calendar: cal, from: now)
         XCTAssertEqual(insights.count, 1)

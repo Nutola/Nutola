@@ -211,7 +211,8 @@ final class TaskTrackerStore: ObservableObject {
         tags: [String] = [],
         dueDate: Date? = nil,
         source: TaskSource? = nil,
-        calendarEventID: String? = nil
+        calendarEventID: String? = nil,
+        createdAt: Date = Date()
     ) -> TrackedTask {
         var task = TrackedTask(
             text: text,
@@ -223,7 +224,7 @@ final class TaskTrackerStore: ObservableObject {
             isChecked: false,
             source: source,
             tags: tags,
-            createdAt: Date(),
+            createdAt: createdAt,
             completedAt: nil,
             dueDate: dueDate,
             calendarEventID: calendarEventID)
@@ -250,10 +251,10 @@ final class TaskTrackerStore: ObservableObject {
     }
 
     /// Toggle the checkbox on a task.
-    func toggle(id: UUID) {
+    func toggle(id: UUID, at: Date = Date()) {
         guard let index = tasks.firstIndex(where: { $0.id == id }) else { return }
         tasks[index].isChecked.toggle()
-        tasks[index].completedAt = tasks[index].isChecked ? Date() : nil
+        tasks[index].completedAt = tasks[index].isChecked ? at : nil
         persist()
     }
 

@@ -30,13 +30,13 @@ final class RecordingSessionTests: XCTestCase {
 
     // #83: a session stopped with no captured audio (both files missing → 0
     // bytes) must surface a non-empty `stopNotice` so the UI can warn the user.
-    func testZeroBytesProducesNotice() {
+    func testZeroBytesProducesNotice() async {
         let id = UUID()
         try? archive.createFolder(for: id)
         let session = RecordingSession(meetingID: id, archive: archive)
         // Don't call start() — no audio capture is set up. The mic/system URLs
         // point at files that don't exist, so attributesOfItem throws → 0 bytes.
-        session.stop()
+        await session.stopAsync()
         XCTAssertNotNil(session.stopNotice, "stopNotice must be set when both capture files are empty")
         XCTAssertEqual(
             session.stopNotice,
