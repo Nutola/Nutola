@@ -376,7 +376,8 @@ struct GranolaFloatingPanel: View {
       transcriptToggle
 
       Button {
-        mode = .ask
+        askSheetQuestion = nil
+        showAskSheet = true
       } label: {
         Text(canAskAboutMeeting ? "Ask anything" : "Ask (needs transcript)")
           .font(.nutola(13))

@@ -194,10 +194,15 @@ final class MeetingTemplateResolverTests: XCTestCase {
         XCTAssertEqual(MeetingTemplateResolver.templateName(for: .generic), "Meeting Notes")
     }
 
-    func testTemplateNameResolvesToABuiltinTemplate() {
+    func testTemplateNameResolvesToABuiltinTemplate() throws {
         // Every name we return must resolve to a real TemplateStore template —
         // otherwise a smart-templates start would hand the summarizer a nil body.
-        let store = TemplateStore()
+        // Use an isolated temp dir so the test doesn't depend on the real user
+        // Templates directory (which may have had builtins deleted).
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("nutola-template-tests-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let store = TemplateStore(root: tmp)
         for type in MeetingType.allCases {
             let name = MeetingTemplateResolver.templateName(for: type)
             XCTAssertNotNil(store.template(named: name), "no template named \(name) for \(type)")

@@ -296,9 +296,9 @@ final class MicRecorder: @unchecked Sendable {
             NutolaConsoleLog.recording(
                 "mic BT engine failed — retrying with [\(builtInName)] (source=\(sourceApp ?? "manual"))")
             teardownLocked()
-            try Self.setDefaultInputDevice(builtIn)
-            savedDefaultInputDevice = previous
             usingBuiltInFallback = true
+            savedDefaultInputDevice = previous
+            try Self.setDefaultInputDevice(builtIn)
             do {
                 try startEngineLocked(writingTo: url)
                 activeInputDeviceName = builtInName
@@ -519,7 +519,6 @@ final class MicRecorder: @unchecked Sendable {
             }
             fresh.prepare()
             try fresh.start()
-            usingBuiltInFallback = false
             NutolaConsoleLog.recording("mic restart OK device=[\(inputName)]")
         } catch {
             NutolaConsoleLog.recording("mic restart failed — \(error.localizedDescription)")
@@ -532,13 +531,15 @@ final class MicRecorder: @unchecked Sendable {
                 let builtInName = Self.deviceName(builtIn) ?? "built-in"
                 NutolaConsoleLog.recording(
                     "mic restart — falling back to built-in [\(builtInName)]")
-                // Tear down the failed engine.
+                // Tear down the failed engine and arm the fallback flag BEFORE
+                // switching the system default — the HAL default-input listener
+                // fires synchronously on setDefaultInputDevice and must see the
+                // suppression, otherwise it queues another restart immediately.
                 fresh.stop(); self.engine = nil
-                try? Self.setDefaultInputDevice(builtIn)
-                savedDefaultInputDevice = previous
                 usingBuiltInFallback = true
+                savedDefaultInputDevice = previous
+                try? Self.setDefaultInputDevice(builtIn)
                 let retry = AVAudioEngine()
-                self.engine = retry
                 do {
                     try installTapLocked(on: retry)
                     configObserver = NotificationCenter.default.addObserver(

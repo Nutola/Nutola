@@ -373,9 +373,15 @@ final class MeetingArchive: @unchecked Sendable {
             guard let files = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)
                 .filter({ $0.lastPathComponent.hasPrefix("summary-") && $0.pathExtension == "md" })
             else { return [] }
-            return files.compactMap { file -> SummarySnapshot? in
+            // Lexicographic filename order == chronological write order (the
+            // epochMS prefix increments; the nonce only breaks ties within a
+            // millisecond). Reverse it for newest-first. This is fully
+            // deterministic even when two snapshots share the same millisecond,
+            // unlike a timestamp-only sort (Swift's sort isn't guaranteed
+            // stable for equal keys).
+            let chronological = files.sorted { $0.lastPathComponent < $1.lastPathComponent }
+            return chronological.compactMap { file -> SummarySnapshot? in
                 let name = file.deletingPathExtension().lastPathComponent
-                // summary-<epochMS>-<nonce> → drop prefix, split off nonce, parse epoch.
                 let withoutPrefix = String(name.dropFirst("summary-".count))
                 let parts = withoutPrefix.split(separator: "-")
                 guard parts.count >= 2, let epochMS = Int64(parts[0]) else { return nil }
@@ -383,7 +389,7 @@ final class MeetingArchive: @unchecked Sendable {
                 return SummarySnapshot(timestamp: Date(timeIntervalSince1970: TimeInterval(epochMS) / 1000),
                                         markdown: text)
             }
-            .sorted { $0.timestamp > $1.timestamp }
+            .reversed() as [SummarySnapshot]
         }
     }
 

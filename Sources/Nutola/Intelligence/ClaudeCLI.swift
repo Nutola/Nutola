@@ -49,6 +49,22 @@ struct ClaudeCLI {
     private static let processLock = NSLock()
     nonisolated(unsafe) private static var runningProcess: Process?
 
+    /// Minimal environment for Claude CLI subprocesses. macOS GUI apps launched
+    /// from Finder/Dock may not have `USER` in their environment, and Claude Code
+    /// needs it to locate credentials. We build a clean env from the process
+    // environment + guaranteed `USER`/`HOME`/`PATH` so the CLI works regardless
+    // of how Nutola was launched.
+    private static func minimalEnv() -> [String: String] {
+        var env = ProcessInfo.processInfo.environment
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        env["HOME"] = home
+        env["USER"] = env["USER"] ?? NSUserName()
+        if env["PATH"] == nil {
+            env["PATH"] = "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin"
+        }
+        return env
+    }
+
     private static func fastProbe() -> URL? {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         let candidates = [
@@ -113,6 +129,7 @@ struct ClaudeCLI {
     static func version() -> String? {
         guard let cli = resolveBlocking() else { return nil }
         let proc = Process()
+        proc.environment = minimalEnv()
         proc.executableURL = cli
         proc.arguments = ["--version"]
         let pipe = Pipe()
@@ -162,6 +179,7 @@ struct ClaudeCLI {
     private static func probeLoggedIn() -> Bool {
         guard let cli = resolveBlocking() else { return false }
         let process = Process()
+        process.environment = minimalEnv()
         process.executableURL = cli
         process.arguments = ["auth", "status", "--json"]
         process.currentDirectoryURL = workDir
@@ -199,6 +217,7 @@ struct ClaudeCLI {
         guard isLoggedIn() else { throw ClaudeCLIError.notLoggedIn }
 
         let process = Process()
+        process.environment = minimalEnv()
         process.executableURL = cli
         process.arguments = buildArgs(
             prompt: prompt, systemPrompt: systemPrompt, model: model, resume: resume,
@@ -281,6 +300,7 @@ struct ClaudeCLI {
         guard isLoggedIn() else { throw ClaudeCLIError.notLoggedIn }
 
         let process = Process()
+        process.environment = minimalEnv()
         process.executableURL = cli
         var args = ["-p", prompt,
                     "--output-format", "stream-json",

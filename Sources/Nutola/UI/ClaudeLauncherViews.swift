@@ -88,6 +88,7 @@ struct AILauncherView: View {
 
     @EnvironmentObject private var app: AppState
     @Environment(\.openSettings) private var openSettings
+    @Environment(\.dismiss) private var dismiss
     @AppStorage(SettingsKey.preferredAIProvider) private var preferredAIProvider: AIProvider = .apple
     @AppStorage(SettingsKey.askDeliveryMode) private var askDeliveryMode: AskDeliveryMode = .cli
     @AppStorage(SettingsKey.askMaxTurns) private var askMaxTurns = 5
@@ -201,6 +202,7 @@ struct AILauncherView: View {
                 .font(.nutola(12, .medium))
                 .buttonStyle(.plain)
                 .foregroundStyle(actionColor)
+            closeButton
         }
     }
 
@@ -241,18 +243,34 @@ struct AILauncherView: View {
     }
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(headline)
-                .font(.nutola(26, .bold))
-                .foregroundStyle(Theme.heading(scheme))
-                .lineLimit(2)
-            if let subtitle {
-                Text(subtitle)
-                    .font(.nutola(13))
-                    .foregroundStyle(Theme.secondary(scheme))
+        HStack(alignment: .top) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(headline)
+                    .font(.nutola(26, .bold))
+                    .foregroundStyle(Theme.heading(scheme))
+                    .lineLimit(2)
+                if let subtitle {
+                    Text(subtitle)
+                        .font(.nutola(13))
+                        .foregroundStyle(Theme.secondary(scheme))
+                }
             }
+            Spacer(minLength: 8)
+            closeButton
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var closeButton: some View {
+        Button {
+            dismiss()
+        } label: {
+            Image(systemName: "xmark.circle.fill")
+                .font(.system(size: 18))
+                .foregroundStyle(Theme.tertiary(scheme))
+        }
+        .buttonStyle(.plain)
+        .help("Close")
     }
 
     private var composeHero: some View {
@@ -692,6 +710,7 @@ struct AILauncherView: View {
                     return
                 }
                 await MainActor.run {
+                    NutolaConsoleLog.ask("answer failed — \(error.localizedDescription)")
                     finishLoadingMessage(text: error.localizedDescription, isError: true)
                     isAnswering = false
                     launchFailed = true
