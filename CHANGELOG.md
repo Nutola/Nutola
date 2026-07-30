@@ -16,6 +16,23 @@ by `make app`. To cut a release:
 
 ## [Unreleased]
 
+## [0.0.2] - 2026-07-29
+
+### Fixed
+- Menu bar freeze on recording start — the Zoom AX-tree scan
+  (`ZoomActiveSpeakerReader.scan`) ran synchronously on the main thread,
+  blocking the menu bar for 20–30s. The scan and tracker creation now run
+  on a background `Task.detached`; the main thread is touched only to wire
+  callbacks and start polling. `ensureZoomTracker` no longer re-scans or
+  blocks on the tracker's serial queue; the initial roster is fetched
+  asynchronously. `startupNotice` uses a cached decision instead of a sync
+  scan. The dead synchronous `shouldTrackZoomSpeakers` was removed.
+- Status-bar item re-rendered every second (shared the 1s elapsed ticker
+  with the in-menu RecordingCard clock). Added a coarse `menuBarElapsed`
+  driven by a 30s timer; the system status bar now redraws every 30s while
+  the in-menu clock stays smooth at 1s.
+
+
 ## [0.0.1] - 2026-07-20
 
 Initial versioned release. Establishes the `VERSION` + `CHANGELOG.md`
