@@ -19,7 +19,7 @@ struct NutolaApp: App {
             MenuBarLabel(
                 detecting: app.detectedAppName != nil,
                 isRecording: app.isRecording,
-                recordingElapsed: app.session?.elapsed ?? 0,
+                recordingElapsed: app.session?.menuBarElapsed ?? 0,
                 nextEvent: menuBarNextEvent)
         }
         .menuBarExtraStyle(.window)

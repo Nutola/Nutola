@@ -23,6 +23,11 @@ final class RecordingSession: ObservableObject {
   private let sourceApp: String?
 
   @Published private(set) var elapsed: TimeInterval = 0
+  /// Coarse elapsed time for the menu-bar status item, refreshed every 30s
+  /// to avoid constant redraws of the system status bar. Driven by
+  /// `menuBarTicker`; the in-menu RecordingCard uses the 1s `elapsed` for a
+  /// smooth clock. Snaps to `elapsed` immediately on start/stop.
+  @Published private(set) var menuBarElapsed: TimeInterval = 0
   @Published private(set) var micBarLevels: [Float] = Array(repeating: 0, count: levelBarCount)
   /// Rolling live transcript (finalized segments) + the current in-progress
   /// fragment, updated in real time while recording. A convenience surface — the
@@ -60,6 +65,10 @@ final class RecordingSession: ObservableObject {
   /// `transcriptionLocale(forMeeting:)` from `TranscriptionLocaleStore` at start.
   private var transcriptionLocale: Locale?
   private var platformSpeakerTracker: PlatformSpeakerTracker?
+  /// Cached result of `shouldTrackZoomSpeakersAsync()`, set during
+  /// `startPostCaptureSetup` so `startupNotice` can answer without a
+  /// synchronous AX scan on MainActor. Nil until the async scan lands.
+  private var zoomTrackingWanted: Bool?
   private var activeObserver: NSObjectProtocol?
   private var rosterTimer: Timer?
   private var systemSignalCheck: Task<Void, Never>?
@@ -69,6 +78,8 @@ final class RecordingSession: ObservableObject {
   private var systemTapWatchdog: Task<Void, Never>?
   private var lastLivePersist = Date.distantPast
   private var ticker: Timer?
+  /// 30s coarse timer driving `menuBarElapsed` for the status-bar item.
+  private var menuBarTicker: Timer?
 
   enum SessionError: LocalizedError {
     case nothingStarted(String)
@@ -324,17 +335,28 @@ final class RecordingSession: ObservableObject {
       }
     }
 
-    if shouldTrackZoomSpeakers() {
-      NutolaConsoleLog.recording(
-        "Zoom speaker tracker \(AccessibilityPermission.isTrusted ? "starting" : "waiting for Accessibility")"
-      )
-      ensureZoomTracker()
-      activeObserver = NotificationCenter.default.addObserver(
-        forName: NSApplication.didBecomeActiveNotification,
-        object: nil,
-        queue: .main
-      ) { [weak self] _ in
-        MainActor.assumeIsolated { self?.ensureZoomTracker() }
+    // The Zoom AX-tree scan (ZoomActiveSpeakerReader.scan) walks every node
+    // in Zoom's accessibility tree and can take 20–30s when the roster is
+    // large. Running it on MainActor freezes the menu bar UI at recording
+    // start. Move the scan + tracker creation off the main thread; only hop
+    // back to MainActor to wire callbacks and start polling.
+    Task.detached { [weak self] in
+      guard let self else { return }
+      let shouldTrack = await self.shouldTrackZoomSpeakersAsync()
+      await MainActor.run {
+        self.zoomTrackingWanted = shouldTrack
+        guard shouldTrack else { return }
+        NutolaConsoleLog.recording(
+          "Zoom speaker tracker \(AccessibilityPermission.isTrusted ? "starting" : "waiting for Accessibility")"
+        )
+        self.ensureZoomTracker()
+        self.activeObserver = NotificationCenter.default.addObserver(
+          forName: NSApplication.didBecomeActiveNotification,
+          object: nil,
+          queue: .main
+        ) { [weak self] _ in
+          MainActor.assumeIsolated { self?.ensureZoomTrackerIfNeeded() }
+        }
       }
     }
 
@@ -344,6 +366,18 @@ final class RecordingSession: ObservableObject {
         self.elapsed = self.elapsedOffset + Date().timeIntervalSince(self.startedAt)
       }
     }
+
+    // Coarse 30s timer for the menu-bar status item — avoids redrawing the
+    // system status bar every second. `elapsed` (1s) stays smooth for the
+    // in-menu RecordingCard; `menuBarElapsed` (30s) feeds only the bar item.
+    menuBarElapsed = elapsedOffset
+    menuBarTicker = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
+      Task { @MainActor in
+        guard let self else { return }
+        self.menuBarElapsed = self.elapsed
+      }
+    }
+    menuBarTicker?.tolerance = 5
 
     if systemStarted {
       systemSignalCheck = Task { [weak self] in
@@ -447,7 +481,7 @@ final class RecordingSession: ObservableObject {
       )
     case (false, false): break
     }
-    if shouldTrackZoomSpeakers(), !AccessibilityPermission.isTrusted {
+    if (zoomTrackingWanted ?? Self.isZoom(sourceApp)), !AccessibilityPermission.isTrusted {
       parts.append(
         "Enable Accessibility for Nutola in Privacy & Security to label Zoom speakers by name.")
     }
@@ -455,6 +489,27 @@ final class RecordingSession: ObservableObject {
   }
 
   func stop() {
+    teardownRecorders()
+    // Compute stopNotice off the main thread to avoid the CoreAudio HAL
+    // deadlock (MicRecorder.stop()/SystemAudioTap.stop() acquire locks that
+    // may be held by a CoreAudio IO callback). Fire-and-forget; the UI
+    // observes `@Published stopNotice` when the async block lands.
+    Task { await finalizeStopNotice() }
+    flushLiveTranscriber()
+  }
+
+  /// Async variant of `stop()` that awaits the file-size check so callers
+  /// (and tests) can observe `stopNotice` deterministically. The recorder
+  /// stops and byte check run on a background thread (same deadlock-avoidance
+  // as `stop()`), then hop back to the main actor to set `stopNotice`.
+  func stopAsync() async {
+    teardownRecorders()
+    await finalizeStopNotice()
+    flushLiveTranscriber()
+  }
+
+  /// Synchronous teardown of timers, observers, trackers, and level meters.
+  private func teardownRecorders() {
     NutolaConsoleLog.recording(
       "stop meeting=\(meetingID.uuidString.prefix(8)) elapsed=\(Int(elapsed))s liveSegments=\(liveSegments.count)"
     )
@@ -464,6 +519,9 @@ final class RecordingSession: ObservableObject {
     systemTapWatchdog = nil
     ticker?.invalidate()
     ticker = nil
+    menuBarTicker?.invalidate()
+    menuBarTicker = nil
+    menuBarElapsed = elapsed
     if let activeObserver {
       NotificationCenter.default.removeObserver(activeObserver)
       self.activeObserver = nil
@@ -477,51 +535,64 @@ final class RecordingSession: ObservableObject {
     LiveTranscriber.remoteSpeakerName = "Others"
     activeRemoteSpeaker = nil
     micBarLevels = Array(repeating: 0, count: Self.levelBarCount)
+  }
+
+  /// Finalize the live transcriber: stop it and flush the last live.json.
+  private func flushLiveTranscriber() {
+    guard let live = liveTranscriber else { return }
+    liveTranscriber = nil
+    let archiveRef = self.archive
+    // This Task inherits the main actor. After the transcribers finalize,
+    // flush the last live.json; the pipeline removes it once the durable
+    // transcript.json lands.
+    Task {
+      await live.stop()
+      archiveRef.saveLiveTranscript(liveSegments, for: meetingID)
+      NutolaConsoleLog.recording("live transcript flushed (\(liveSegments.count) segments)")
+    }
+  }
+
+  /// Stop the mic/system recorders (off the main actor, when called via
+  /// `Task.detached`) and compute `stopNotice`. Set when both capture files
+  /// are 0 bytes, signalling the UI that no audio was captured. The recorder
+  /// stops must run off the main thread because `MicRecorder.stop()` and
+  /// `SystemAudioTap.stop()` acquire internal locks/queues that may be held
+  /// by a CoreAudio IO callback or a route restart — blocking the main
+  /// thread here freezes the UI (the deadlock seen when
+  /// `restartAfterConfigurationChange` holds `MicRecorder.lock` while
+  /// `stop()` waits for it on the main thread).
+  private func finalizeStopNotice() async {
     let micURL = archive.micURL(for: meetingID)
     let systemURL = archive.systemURL(for: meetingID)
     let micHeard = micStarted ? mic.captureStats.receivedAnyBuffer : false
     let systemSignal = systemStarted ? tap.signalDetected : false
-    // Dispatch the recorder stops AND the file-size check to a background thread —
-    // MicRecorder.stop() and SystemAudioTap.stop() acquire internal locks/queues
-    // that may be held by a restart or CoreAudio IO callback. Blocking on the
-    // main thread here freezes the UI (the deadlock seen when
-    // restartAfterConfigurationChange holds MicRecorder.lock while stop() waits
-    // for it on the main thread). The stopNotice result is set async via Task.
     let micRecorder = mic
     let systemTap = tap
     let didMic = micStarted
     let didSystem = systemStarted
-    let archiveRef = self.archive
-    Task.detached(priority: .userInitiated) {
+    // Run the blocking recorder stops + file-size check off the main actor
+    // (see deadlock note above), then set `stopNotice` back here on the main
+    // actor — no `MainActor.run` hop needed since this method is @MainActor
+    // and the `await` returns us here.
+    let micBytes: Int
+    let systemBytes: Int
+    (micBytes, systemBytes) = await Task.detached(priority: .userInitiated) {
       if didMic { micRecorder.stop() }
       if didSystem { systemTap.stop() }
-      let micBytes =
+      let m =
         (try? FileManager.default.attributesOfItem(atPath: micURL.path)[.size] as? Int) ?? 0
-      let systemBytes =
+      let s =
         (try? FileManager.default.attributesOfItem(atPath: systemURL.path)[.size] as? Int) ?? 0
-      NutolaConsoleLog.recording(
-        "capture files mic=\(micBytes)B system=\(systemBytes)B micSignal=\(micHeard) systemSignal=\(systemSignal)"
-      )
-      await MainActor.run { [weak self] in
-        guard let self else { return }
-        if micBytes == 0 && systemBytes == 0 {
-          self.stopNotice = "No audio was captured — check your microphone and system audio settings"
-          NutolaConsoleLog.recording("stop notice: no audio captured (both files empty)")
-        } else {
-          self.stopNotice = nil
-        }
-      }
-    }
-    if let live = liveTranscriber {
-      liveTranscriber = nil
-      // This Task inherits the main actor. After the transcribers finalize,
-      // flush the last live.json; the pipeline removes it once the durable
-      // transcript.json lands.
-      Task {
-        await live.stop()
-        archiveRef.saveLiveTranscript(liveSegments, for: meetingID)
-        NutolaConsoleLog.recording("live transcript flushed (\(liveSegments.count) segments)")
-      }
+      return (m, s)
+    }.value
+    NutolaConsoleLog.recording(
+      "capture files mic=\(micBytes)B system=\(systemBytes)B micSignal=\(micHeard) systemSignal=\(systemSignal)"
+    )
+    if micBytes == 0 && systemBytes == 0 {
+      stopNotice = "No audio was captured — check your microphone and system audio settings"
+      NutolaConsoleLog.recording("stop notice: no audio captured (both files empty)")
+    } else {
+      stopNotice = nil
     }
   }
 
@@ -529,26 +600,29 @@ final class RecordingSession: ObservableObject {
     MeetingDetector.isZoomSource(sourceApp)
   }
 
-  /// Zoom speaker tracking when source is Zoom, or Zoom's meeting UI is visible via AX.
-  private func shouldTrackZoomSpeakers() -> Bool {
+  /// Async variant that runs the AX scan off MainActor. The fast path
+  /// (Zoom source) returns immediately without a scan.
+  private func shouldTrackZoomSpeakersAsync() async -> Bool {
     if Self.isZoom(sourceApp) { return true }
     guard AccessibilityPermission.isTrusted else { return false }
-    let scan = ZoomActiveSpeakerReader.scan()
-    guard scan.zoomPID != nil, !scan.roster.isEmpty else { return false }
-    NutolaConsoleLog.zoom(
-      "inferred Zoom meeting from AX roster [\(scan.roster.joined(separator: ", "))] despite source=\(sourceApp ?? "manual")"
-    )
-    return true
+    let app = sourceApp
+    return await Task.detached(priority: .userInitiated) {
+      let scan = ZoomActiveSpeakerReader.scan()
+      guard scan.zoomPID != nil, !scan.roster.isEmpty else { return false }
+      NutolaConsoleLog.zoom(
+        "inferred Zoom meeting from AX roster [\(scan.roster.joined(separator: ", "))] despite source=\(app ?? "manual")"
+      )
+      return true
+    }.value
   }
 
   /// Starts (or resumes) the Zoom tracker once Accessibility trust is granted.
+  /// The caller MUST have already verified tracking is needed (via
+  /// `shouldTrackZoomSpeakersAsync`) — this does NOT re-scan, so it's safe to
+  /// call on MainActor without blocking. The immediate initial roster is fetched
+  /// asynchronously to avoid blocking MainActor on the tracker's serial queue
+  /// (its `logInitialScan` runs a full AX walk on that queue).
   private func ensureZoomTracker() {
-    guard shouldTrackZoomSpeakers() else {
-      NutolaConsoleLog.zoom(
-        "ensureZoomTracker skipped source=\(sourceApp ?? "manual") accessibility=\(AccessibilityPermission.isTrusted)"
-      )
-      return
-    }
     if platformSpeakerTracker != nil {
       NutolaConsoleLog.zoom("ensureZoomTracker — already running")
       return
@@ -603,12 +677,38 @@ final class RecordingSession: ObservableObject {
     platformSpeakerTracker = tracker
     tracker.start()
 
-    // Do an immediate roster scan so participant names appear right away,
-    // rather than waiting up to 2s for the first timer tick.
-    let initialRoster = tracker.currentRoster()
-    if !initialRoster.isEmpty {
-      liveRoster = initialRoster
-      updateLiveSpeakerNames(from: initialRoster)
+    // Fetch the initial roster off MainActor so participant names appear
+    // promptly without blocking the main thread on the tracker's serial
+    // queue (which runs a full AX scan in logInitialScan). The 2s roster
+    // timer above is the fallback if this loses the race.
+    Task { [weak tracker, weak self] in
+      guard let tracker else { return }
+      let roster = await Task.detached(priority: .userInitiated) {
+        tracker.currentRoster()
+      }.value
+      await MainActor.run {
+        guard let self, !roster.isEmpty, roster != self.liveRoster else { return }
+        self.liveRoster = roster
+        self.updateLiveSpeakerNames(from: roster)
+        NutolaConsoleLog.zoom("initial roster: [\(roster.joined(separator: ", "))]")
+      }
+    }
+  }
+
+  /// Called from `didBecomeActive` — re-checks async whether Zoom tracking is
+  /// needed (the user may have just granted Accessibility, or a meeting may
+  /// have started since the initial scan), then creates the tracker if so.
+  /// Never blocks MainActor on an AX scan.
+  private func ensureZoomTrackerIfNeeded() {
+    if platformSpeakerTracker != nil { return }
+    Task.detached { [weak self] in
+      guard let self else { return }
+      let shouldTrack = await self.shouldTrackZoomSpeakersAsync()
+      await MainActor.run {
+        self.zoomTrackingWanted = shouldTrack
+        guard shouldTrack else { return }
+        self.ensureZoomTracker()
+      }
     }
   }
 
