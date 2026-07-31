@@ -267,6 +267,14 @@ final class MicRecorder: @unchecked Sendable {
     /// default-input listener so Chrome/Meet resetting the default to the BT
     /// headset doesn't kill our engine.
     private var usingBuiltInFallback = false
+    /// Coalesces restart bursts: when AirPods connect, the HAL fires multiple
+    /// default-input-device-changed notifications in the same millisecond.
+    /// Without coalescing, each enqueues a separate
+    /// `restartAfterConfigurationChange` on `restartQueue`, and the concurrent
+    /// `AVAudioEngine` rebuilds contend for the HAL mutex → deadlock → SIGSEGV.
+    /// This work item is cancelled and rescheduled on each notification so
+    /// only the last one fires (~200ms later).
+    private var pendingRestartWork: DispatchWorkItem?
 
     func start(writingTo url: URL, sourceApp: String? = nil) throws {
         lock.lock()
@@ -345,7 +353,7 @@ final class MicRecorder: @unchecked Sendable {
             object: engine,
             queue: nil
         ) { [weak self] _ in
-            self?.restartQueue.async { self?.restartAfterConfigurationChange() }
+            self?.scheduleCoalescedRestart()
         }
         // Also listen for default input device changes at the Core Audio level.
         // AVAudioEngine's .configurationChange doesn't fire when the system's default
@@ -367,7 +375,7 @@ final class MicRecorder: @unchecked Sendable {
                 return
             }
             NutolaConsoleLog.recording("mic default input device changed — restarting")
-            self?.restartQueue.async { self?.restartAfterConfigurationChange() }
+            self?.scheduleCoalescedRestart()
         }
         AudioObjectAddPropertyListenerBlock(
             AudioObjectID(kAudioObjectSystemObject), &inputAddr, restartQueue, inputListener)
@@ -469,6 +477,26 @@ final class MicRecorder: @unchecked Sendable {
         }
     }
 
+    /// Coalesces a burst of restart requests into a single
+    /// `restartAfterConfigurationChange` ~200ms later. When AirPods connect,
+    /// the HAL fires 9+ default-input-device-changed notifications in the same
+    /// millisecond. Without coalescing, each enqueues a separate restart on
+    /// `restartQueue`, and the concurrent AVAudioEngine rebuilds contend for
+    /// the HAL mutex → deadlock → SIGSEGV. Cancelling the pending work item
+    /// ensures only the last notification in a burst actually restarts.
+    private func scheduleCoalescedRestart() {
+        pendingRestartWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            self?.lock.lock()
+            let hasFile = self?.file != nil
+            self?.lock.unlock()
+            guard hasFile else { return }
+            self?.restartAfterConfigurationChange()
+        }
+        pendingRestartWork = work
+        restartQueue.asyncAfter(deadline: .now() + 0.2, execute: work)
+    }
+
     /// Default input device switched: the engine stops itself and the old tap format is stale.
     /// Rebuild a fresh AVAudioEngine bound to the current default input, keeping the
     /// same open file so the recording stays continuous. If the new engine fails to
@@ -515,7 +543,7 @@ final class MicRecorder: @unchecked Sendable {
                 object: fresh,
                 queue: nil
             ) { [weak self] _ in
-                self?.restartQueue.async { self?.restartAfterConfigurationChange() }
+                self?.scheduleCoalescedRestart()
             }
             fresh.prepare()
             try fresh.start()
@@ -547,7 +575,7 @@ final class MicRecorder: @unchecked Sendable {
                         object: retry,
                         queue: nil
                     ) { [weak self] _ in
-                        self?.restartQueue.async { self?.restartAfterConfigurationChange() }
+                        self?.scheduleCoalescedRestart()
                     }
                     retry.prepare()
                     try retry.start()
@@ -568,6 +596,8 @@ final class MicRecorder: @unchecked Sendable {
     }
 
     private func teardownLocked() {
+        pendingRestartWork?.cancel()
+        pendingRestartWork = nil
         if let configObserver {
             NotificationCenter.default.removeObserver(configObserver)
             self.configObserver = nil
