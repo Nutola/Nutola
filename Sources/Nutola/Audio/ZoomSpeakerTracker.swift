@@ -337,6 +337,16 @@ enum ZoomActiveSpeakerReader {
                 scannedWindows = [focused]
             }
         }
+        // No window accessible at all — Zoom is on another Space, minimized, or
+        // its window is mid-redraw. Walking root yields only the menu bar (an
+        // empty roster), and caching that would blank the UI on every transient
+        // AX failure. Instead, keep the last known non-empty result so the
+        // roster and active-speaker timeline stay stable until the window
+        // reappears. If there's no prior result, fall through to the root walk
+        // so the first scan still runs (and logs/dumps for diagnosis).
+        if scannedWindows.isEmpty, let cached = lastScanResult, !cached.roster.isEmpty {
+            return cached
+        }
         let signature = treeSignature(of: scannedWindows, fallback: root)
         if signature == lastScanSignature, let cached = lastScanResult {
             return cached
@@ -638,6 +648,12 @@ enum ZoomActiveSpeakerReader {
             return nil
         }
         if lower.contains("participant") || lower.contains("meeting") || lower.contains("mute") {
+            return nil
+        }
+        // Chat-panel context lines leak through as AXRow/AXCell children:
+        // "Reply to Victor Moura de Britto", "Reply to Gui Lima". These are
+        // reply affordances, not participant names.
+        if lower.hasPrefix("reply to") {
             return nil
         }
         return cleaned(text)
