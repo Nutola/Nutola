@@ -52,6 +52,11 @@ final class ZoomSpeakerTracker: PlatformSpeakerTracker, @unchecked Sendable {
     private var lastRoster: [String] = []
     private var rosterPersisted = false
     private var lastLocalMuted: Bool?
+    /// One-shot: dump the AX tree once when active speaker detection fails for
+    /// several consecutive ticks despite having a roster. `logInitialScan` only
+    /// fires at start(); if the meeting starts after Nutola launches, we'd never
+    /// get a dump. This fires mid-meeting the first time emptyStreak hits 10.
+    private var dumpedForEmptyActive = false
 
     /// Called on the main queue when the local participant's Zoom mute state changes.
     /// True = muted in Zoom (don't capture mic), false = unmuted (capture mic).
@@ -145,8 +150,8 @@ final class ZoomSpeakerTracker: PlatformSpeakerTracker, @unchecked Sendable {
             "initial scan zoomPID=\(scan.zoomPID.map(String.init) ?? "nil") roster=[\(scan.roster.joined(separator: ", "))] active=[\(scan.active.joined(separator: ", "))] captions=\(scan.latestCaption.map { "\($0.name): \($0.text.prefix(40))" } ?? "none")")
         // Full AX tree dump for debugging — reveals tile descriptions, roles, and
         // attributes the parsers might miss. Logged at .info so it appears in Console.app.
-        if scan.roster.isEmpty && scan.active.isEmpty {
-            NutolaConsoleLog.zoom("no roster or active speakers found — dumping full AX tree for diagnosis")
+        if scan.roster.isEmpty || (scan.active.isEmpty && !scan.roster.isEmpty) {
+            NutolaConsoleLog.zoom("no active speaker found (roster=\(scan.roster.count)) — dumping full AX tree for diagnosis")
             ZoomActiveSpeakerReader.dumpAXTree()
         }
     }
@@ -216,6 +221,16 @@ final class ZoomSpeakerTracker: PlatformSpeakerTracker, @unchecked Sendable {
                 NutolaConsoleLog.zoom(
                     "no participant tiles found — is Zoom in a meeting? pid=\(scan.zoomPID.map(String.init) ?? "nil")")
             }
+        }
+        // One-shot mid-meeting diagnostic dump: if we've had 10+ consecutive
+        // ticks with no active speaker but a populated roster, dump the AX tree
+        // once so we can see what attributes Zoom exposes for the active speaker.
+        // logInitialScan only fires at start(); this catches meetings that begin
+        // after Nutola launches.
+        if !dumpedForEmptyActive, emptyTickStreak >= 10, !scan.roster.isEmpty {
+            dumpedForEmptyActive = true
+            NutolaConsoleLog.zoom("emptyStreak=\(emptyTickStreak) with roster=\(scan.roster.count) — dumping AX tree for active-speaker diagnosis")
+            ZoomActiveSpeakerReader.dumpAXTree()
         }
     }
 
@@ -348,11 +363,20 @@ enum ZoomActiveSpeakerReader {
             return cached
         }
         let signature = treeSignature(of: scannedWindows, fallback: root)
-        if signature == lastScanSignature, let cached = lastScanResult {
+        // Bypass the cache when we have participants but no active speaker.
+        // The signature hashes role/title/description/childCount — NOT AXValue
+        // or AXSelected. If Zoom indicates the active speaker via a mechanism
+        // other than the tile description (AXValue, a child element, visual
+        // highlight), the signature stays stable across speaker transitions and
+        // the cache would return the same empty-active result forever. Forcing
+        // a fresh walk every tick ensures any new parser logic actually runs.
+        if signature == lastScanSignature, let cached = lastScanResult,
+           !(cached.active.isEmpty && !cached.roster.isEmpty) {
             return cached
         }
 
         var roster: [String] = []
+        var tileNames: [String] = []
         var activeTiles: [String] = []
         var activeLabels: [String] = []
         var selectedTiles: [String] = []
@@ -366,18 +390,35 @@ enum ZoomActiveSpeakerReader {
         // 3. kAXChildrenAttribute on root — last resort (usually just the menu bar).
         if scannedWindows.isEmpty {
             walk(
-                root, depth: 0, roster: &roster, activeTiles: &activeTiles,
-                activeLabels: &activeLabels, selectedTiles: &selectedTiles,
-                latestCaption: &latestCaption, localMuted: &localMuted)
+                root, depth: 0, roster: &roster, tileNames: &tileNames,
+                activeTiles: &activeTiles, activeLabels: &activeLabels,
+                selectedTiles: &selectedTiles, latestCaption: &latestCaption,
+                localMuted: &localMuted)
         } else {
             for window in scannedWindows {
                 walk(
-                    window, depth: 0, roster: &roster, activeTiles: &activeTiles,
-                    activeLabels: &activeLabels, selectedTiles: &selectedTiles,
-                    latestCaption: &latestCaption, localMuted: &localMuted)
+                    window, depth: 0, roster: &roster, tileNames: &tileNames,
+                    activeTiles: &activeTiles, activeLabels: &activeLabels,
+                    selectedTiles: &selectedTiles, latestCaption: &latestCaption,
+                    localMuted: &localMuted)
             }
         }
-        let rosterOut = deduped(roster)
+        // Tile descriptions (AXGroup/AXTabGroup with "Computer audio, Video on")
+        // are authoritative participant names. Row-based parsing (AXRow/AXCell)
+        // is a fallback for when no tiles are found — but it also catches Zoom
+        // Phone call-history entries ("DoorDash", phone numbers) and chat-panel
+        // rows. When tiles found participants, filter the roster to only keep
+        // tile-derived names plus row names that closely match a tile name.
+        let tileSet = deduped(tileNames)
+        let rosterFiltered: [String]
+        if !tileSet.isEmpty {
+            rosterFiltered = roster.filter { name in
+                tileSet.contains(name) || tileSet.contains { nameMatchesRoster(name, [$0]) }
+            }
+        } else {
+            rosterFiltered = roster
+        }
+        let rosterOut = deduped(rosterFiltered)
         // Gallery tiles list every unmuted participant; only trust explicit
         // "active speaker" markers on those tiles. Legacy labels (participants
         // panel, notifications) are a fallback when no tile is marked.
@@ -472,12 +513,14 @@ enum ZoomActiveSpeakerReader {
             let title = attribute(element, kAXTitleAttribute as CFString) ?? ""
             let val = attribute(element, kAXValueAttribute as CFString) ?? ""
             let sel = isSelected(element)
+            let ident = attribute(element, kAXIdentifierAttribute as CFString) ?? ""
             let indent = String(repeating: "  ", count: min(depth, 10))
-            if !desc.isEmpty || !title.isEmpty || !val.isEmpty || r != "AXUnknown" {
+            if !desc.isEmpty || !title.isEmpty || !val.isEmpty || !ident.isEmpty || r != "AXUnknown" {
                 var parts = ["role=\(r)"]
                 if !desc.isEmpty { parts.append("desc=\(desc.prefix(120))") }
                 if !title.isEmpty { parts.append("title=\(title.prefix(80))") }
                 if !val.isEmpty { parts.append("val=\(val.prefix(80))") }
+                if !ident.isEmpty { parts.append("id=\(ident.prefix(60))") }
                 if sel { parts.append("SELECTED") }
                 NutolaConsoleLog.zoom("AX[\(count)] \(indent)\(parts.joined(separator: " "))")
                 count += 1
@@ -522,6 +565,7 @@ enum ZoomActiveSpeakerReader {
         _ element: AXUIElement,
         depth: Int,
         roster: inout [String],
+        tileNames: inout [String],
         activeTiles: inout [String],
         activeLabels: inout [String],
         selectedTiles: inout [String],
@@ -535,6 +579,7 @@ enum ZoomActiveSpeakerReader {
             if let desc = attribute(element, kAXDescriptionAttribute as CFString) {
                 if let name = parseZoomParticipantDescription(desc) {
                     roster.append(name)
+                    tileNames.append(name)
                     if isSelected(element) {
                         selectedTiles.append(name)
                     }
@@ -550,6 +595,14 @@ enum ZoomActiveSpeakerReader {
                     }
                 }
                 if let name = parseZoomTileDescription(desc) {
+                    activeTiles.append(name)
+                }
+            }
+            // Zoom may indicate the active speaker via AXValue instead of (or in
+            // addition to) AXDescription — some view modes put the speaking
+            // marker there. Check it as a fallback for active-speaker detection.
+            if let val = attribute(element, kAXValueAttribute as CFString) {
+                if let name = parseZoomTileDescription(val) {
                     activeTiles.append(name)
                 }
             }
@@ -578,9 +631,10 @@ enum ZoomActiveSpeakerReader {
 
         for child in children(element) {
             walk(
-                child, depth: depth + 1, roster: &roster, activeTiles: &activeTiles,
-                activeLabels: &activeLabels, selectedTiles: &selectedTiles,
-                latestCaption: &latestCaption, localMuted: &localMuted)
+                child, depth: depth + 1, roster: &roster, tileNames: &tileNames,
+                activeTiles: &activeTiles, activeLabels: &activeLabels,
+                selectedTiles: &selectedTiles, latestCaption: &latestCaption,
+                localMuted: &localMuted)
         }
     }
 
@@ -656,6 +710,28 @@ enum ZoomActiveSpeakerReader {
         if lower.hasPrefix("reply to") {
             return nil
         }
+        // Zoom Phone call-history rows leak through when the Phone tab is open
+        // instead of a meeting: "+ 5 5 1 1 9 8 4 6 9...", "DoorDash", phone
+        // numbers, "Incoming"/"Outgoing"/"Canceled"/"Missed" call labels.
+        // Reject entries containing phone-number patterns (digits separated by
+        // spaces), call-direction keywords, or known org names from call logs.
+        if lower.contains("incoming") || lower.contains("outgoing") ||
+            lower.contains("canceled") || lower.contains("missed call") ||
+            lower.contains("voicemail") {
+            return nil
+        }
+        // Phone numbers: "+ 5 5 1 1 ..." or "(555) 123-4567" or "555-123-4567".
+        // Match digit-heavy strings with separators (phone format), or entries
+        // starting with "+".
+        if text.hasPrefix("+") { return nil }
+        let digitCount = text.filter(\.isNumber).count
+        let letterCount = text.filter(\.isLetter).count
+        if digitCount >= 7 && digitCount > letterCount { return nil }
+        // Call-log entries often have multiple consecutive commas:
+        // "Gui Lima, Outgoing, 2:30 PM, 5 min". Meeting participant rows are a
+        // single display name with no comma-separated fields.
+        let commaCount = text.filter { $0 == "," }.count
+        if commaCount >= 2 { return nil }
         return cleaned(text)
     }
 
