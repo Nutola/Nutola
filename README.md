@@ -113,6 +113,29 @@ Recording → "System Audio Recording Only").
 Pick your assistant in **Settings → Intelligence**. For Claude or Codex, add the Nutola MCP
 connector once — the app has one-click setup buttons, or run it yourself:
 
+### Read meetings from the CLI
+
+The installed app binary also exposes a read-only CLI. This works without MCP discovery and reads
+the same local archive as the app:
+
+```bash
+NUTOLA=/Applications/Nutola.app/Contents/MacOS/Nutola
+
+$NUTOLA meetings list --limit 20 --offset 0
+$NUTOLA meetings search device token --limit 20 --offset 0
+$NUTOLA meetings show 123E4567-E89B-12D3-A456-426614174000
+$NUTOLA meetings transcript 123E4567-E89B-12D3-A456-426614174000
+$NUTOLA meetings live                 # most recent six minutes
+$NUTOLA meetings live --minutes 0     # whole live meeting
+$NUTOLA meetings help
+```
+
+`list` and `search` print `next_offset` when another page is available. Limits are clamped to
+`1...200`; offsets and live-minute windows must be non-negative. Successful results are written to
+stdout. Invalid commands and missing meetings are written to stderr with a non-zero exit status.
+The CLI cannot edit summaries, templates, transcripts, or meetings. The existing `--mcp` server
+remains available for read and write integrations.
+
 ### Claude Code
 
 ```bash
