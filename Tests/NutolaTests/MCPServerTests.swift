@@ -134,6 +134,27 @@ final class MCPServerTests: XCTestCase {
         XCTAssertTrue(text.contains("Priya"))
     }
 
+    func testReadToolsMatchSharedMeetingService() throws {
+        let reads = MeetingCommandService(archive: archive)
+        let cases: [(String, [String: Any], String)] = [
+            ("list_meetings", [:], reads.list(limit: 20, offset: 0)),
+            ("search_meetings", ["query": "march"], try reads.search(query: "march", limit: 20, offset: 0)),
+            ("get_meeting", ["id": meeting.id.uuidString], try reads.show(id: meeting.id.uuidString)),
+            ("get_transcript", ["id": meeting.id.uuidString], try reads.transcript(id: meeting.id.uuidString)),
+            ("get_live_transcript", [:], reads.live(minutes: nil)),
+        ]
+
+        for (index, value) in cases.enumerated() {
+            let response = try roundTrip([
+                "jsonrpc": "2.0", "id": 100 + index, "method": "tools/call",
+                "params": ["name": value.0, "arguments": value.1],
+            ])
+            let result = response["result"] as! [String: Any]
+            let content = result["content"] as! [[String: Any]]
+            XCTAssertEqual(content[0]["text"] as? String, value.2, value.0)
+        }
+    }
+
     func testToolErrorsAreSoft() throws {
         let resp = try roundTrip([
             "jsonrpc": "2.0", "id": 7, "method": "tools/call",

@@ -11,10 +11,12 @@ final class MCPServer {
 
     private let archive: MeetingArchive
     private let templates: TemplateStore
+    private let reads: MeetingCommandService
 
     init(archive: MeetingArchive, templates: TemplateStore) {
         self.archive = archive
         self.templates = templates
+        self.reads = MeetingCommandService(archive: archive)
     }
 
     func runBlocking() {
@@ -264,58 +266,26 @@ final class MCPServer {
     func call(tool: String, arguments: [String: Any]) throws -> String {
         switch tool {
         case "list_meetings":
-            let limit = max(1, min(200, arguments["limit"] as? Int ?? 20))
-            let offset = max(0, arguments["offset"] as? Int ?? 0)
-            let all = archive.allMeetings()
-            if all.isEmpty { return "No meetings recorded yet." }
-            guard offset < all.count else { return "No more meetings (offset \(offset) ≥ \(all.count))." }
-            let page = Array(all.dropFirst(offset).prefix(limit))
-            var body = page.map(Self.describe).joined(separator: "\n")
-            let nextOffset = offset + page.count
-            if nextOffset < all.count {
-                body += "\n\nnext_offset: \(nextOffset) (more meetings remain; pass offset=\(nextOffset) to fetch the next page)"
-            }
-            return body
+            return reads.list(
+                limit: arguments["limit"] as? Int ?? 20,
+                offset: arguments["offset"] as? Int ?? 0
+            )
 
         case "search_meetings":
-            guard let query = arguments["query"] as? String, !query.isEmpty else {
-                throw ToolError.badArgument("'query' is required")
-            }
-            let limit = max(1, min(200, arguments["limit"] as? Int ?? 20))
-            let offset = max(0, arguments["offset"] as? Int ?? 0)
-            let all = archive.search(query)
-            if all.isEmpty { return "No meetings matched \"\(query)\"." }
-            guard offset < all.count else { return "No more matches for \"\(query)\" (offset \(offset) ≥ \(all.count))." }
-            let page = Array(all.dropFirst(offset).prefix(limit))
-            var body = page.map { hit in
-                Self.describe(hit.meeting) + hit.excerpts.map { "\n    · \($0)" }.joined()
-            }.joined(separator: "\n")
-            let nextOffset = offset + page.count
-            if nextOffset < all.count {
-                body += "\n\nnext_offset: \(nextOffset) (more matches remain; pass offset=\(nextOffset) to fetch the next page)"
-            }
-            return body
+            return try reads.search(
+                query: arguments["query"] as? String ?? "",
+                limit: arguments["limit"] as? Int ?? 20,
+                offset: arguments["offset"] as? Int ?? 0
+            )
 
         case "get_meeting":
-            let meeting = try meetingArg(arguments)
-            let summary = archive.summary(for: meeting.id)
-            var out = Self.describe(meeting)
-            if !meeting.attendees.isEmpty {
-                out += "\nAttendees: \(meeting.attendees.joined(separator: ", "))"
-            }
-            out += "\nSpeakers: \(meeting.speakers.map(\.name).joined(separator: ", "))"
-            out += "\n\n" + (summary.isEmpty ? "(no summary yet)" : summary)
-            return out
+            return try reads.show(id: arguments["id"] as? String ?? "")
 
         case "get_transcript":
-            let meeting = try meetingArg(arguments)
-            let segments = archive.transcript(for: meeting.id)
-            if segments.isEmpty { return "(no transcript for \(meeting.title))" }
-            return "# \(meeting.title)\n\n"
-                + TranscriptFormatter.plainText(segments, speakers: meeting.speakers)
+            return try reads.transcript(id: arguments["id"] as? String ?? "")
 
         case "get_live_transcript":
-            return Self.liveTranscriptText(archive: archive, minutes: arguments["minutes"] as? Int)
+            return reads.live(minutes: arguments["minutes"] as? Int)
 
         case "update_summary":
             let meeting = try meetingArg(arguments)
@@ -458,60 +428,10 @@ final class MCPServer {
         return headings.isEmpty ? t.name : "\(t.name): \(headings.joined(separator: ", "))"
     }
 
-    private static func describe(_ m: Meeting) -> String {
-        let df = DateFormatter()
-        df.dateStyle = .medium
-        df.timeStyle = .short
-        var line = "[\(m.id.uuidString)] \(m.title) — \(df.string(from: m.createdAt))"
-        if m.duration > 0 { line += " (\(TemplateRenderer.duration(m.duration)))" }
-        return line
-    }
-
-    /// The in-progress meeting is the one still in `.recording` state. A crash-orphaned
-    /// meeting (state stuck at `.recording` until the next launch's `finalizeOrphans`)
-    /// is guarded out by requiring a recently-modified `live.json`. Static +
-    /// archive-injected so it's unit-testable.
-    /// Default recent window handed back when the caller doesn't ask for more —
-    /// enough for "what should I add/ask right now" without making Claude read
-    /// (and regurgitate) the whole meeting.
-    static let liveDefaultWindowMinutes = 6
+    static let liveDefaultWindowMinutes = MeetingCommandService.liveDefaultWindowMinutes
 
     static func liveTranscriptText(archive: MeetingArchive, now: Date = Date(), minutes: Int? = nil) -> String {
-        guard let meeting = archive.allMeetings().first(where: { $0.state == .recording }),
-              let modified = archive.liveTranscriptModified(for: meeting.id),
-              now.timeIntervalSince(modified) < 60
-        else { return "No meeting is being recorded right now." }
-        let all = archive.liveTranscript(for: meeting.id)
-        guard !all.isEmpty else {
-            return "A meeting is being recorded (\"\(meeting.title)\"), but nothing has been transcribed yet."
-        }
-
-        // Default to the recent tail; minutes == 0 (or negative) means the whole meeting.
-        let window = minutes ?? liveDefaultWindowMinutes
-        var segments = all
-        var trimmed = false
-        if window > 0, let latest = all.map(\.end).max() {
-            let cutoff = latest - TimeInterval(window) * 60
-            let recent = all.filter { $0.end >= cutoff }
-            if recent.count < all.count { segments = recent; trimmed = true }
-        }
-        let body = TranscriptFormatter.plainText(segments, speakers: LiveTranscriber.speakers)
-        let scope = trimmed
-            ? "the last \(window) minutes of the live transcript (call again with a larger \"minutes\", or minutes=0 for the whole meeting, if you need earlier context)"
-            : "the live transcript so far"
-
-        // The result text is the last thing in Claude's context before it answers, so
-        // steer for a fast, short reply here (both before and after the body) rather
-        // than in the pre-filled prompt.
-        return """
-        [The user is IN this meeting right now and needs a fast, glanceable answer. Reply in 1-2 sentences, no preamble, and don't summarize the transcript back — answer only what was asked.]
-
-        Here is \(scope) of "\(meeting.title)". This is a real-time approximation (it may lag a few seconds behind and isn't final):
-
-        \(body)
-
-        [Reminder: the user is live in the meeting — answer now, in 1-2 sentences.]
-        """
+        MeetingCommandService.liveTranscriptText(archive: archive, now: now, minutes: minutes)
     }
 
     // MARK: - JSON-RPC plumbing
